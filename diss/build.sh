@@ -1,0 +1,1 @@
+docker run --rm -i -v "$(pwd)":/diplom:Z 2109199812/docker-latex pdflatex -interaction=nonstopmode diploma.tex
