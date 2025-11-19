@@ -1,5 +1,7 @@
 import random
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy import special
 
 # Generate random bits function
 def genBits(size):
@@ -17,14 +19,11 @@ def bpsk(bits):
 
 # Calculate Doppler multyplier per each subc
 def preCalcDoppler(fft_size, subc_freq, doppler_factor):
-    doppler_exp = [0] * fft_size
+    time_indices = np.arange(fft_size)
+    doppler_phase = 2 * np.pi * subc_freq * doppler_factor * time_indices
+    doppler_signal = np.exp(1j * doppler_phase)
 
-    for i in range(fft_size):
-        # exp_arg[i] = 2 * Pi * i * subc_freq * doppler_factor
-        arg = complex(0, 2 * np.pi * subc_freq * doppler_factor * i)
-        doppler_exp[i] = np.exp(arg)
-
-    return doppler_exp
+    return doppler_signal
 
 def noiseInsertion(arr, snr_db):
     # Средняя мощность сигнала на отсчёт
@@ -64,54 +63,96 @@ def calcDemProb(inBits, outBits):
 
     return prob
 
+# Calculate number of failed bits
+def calcFailedBits(inBits, outBits):
+    numBits = 0
 
-#def calculatePoint(fft_size, subc_freq, doppler_factor, snr, num_experiments):
-#    total_bits = 0
-#    total_errors = 0
+    for i in range(len(inBits)):
+        numBits += 0 if inBits[i] == outBits[i] else 1
 
-#    for i in range(num_experiments):
-      
+    return numBits 
+
+
+def calculatePoint(fft_size, snr, num_experiments, doppler_exp):
+    total_bits = fft_size * num_experiments
+    total_errors = 0
+
+
+    # Num of experiments cycle
+    for i in range(num_experiments):
+        bits = genBits(fft_size)
+
+        modBits = bpsk(bits)
+
+        spectrum = np.fft.ifft(modBits, fft_size)
+
+        spectrumDoppler = np.multiply(spectrum, doppler_exp)
+
+        noiseSignal = noiseInsertion(spectrumDoppler, snr)
+
+        signalRx = np.fft.fft(noiseSignal, fft_size)
+        
+        outBits = bpskDemapper(signalRx)
+
+        total_errors += calcFailedBits(bits, outBits)
+    
+    return total_errors / total_bits
+
+def plotBer(snr_range, ber_results, theoretical_ber=None):
+    """
+    Построение графика BER
+    """
+    plt.figure(figsize=(10, 6))
+    plt.semilogy(snr_range, ber_results, 'bo-', linewidth=2, markersize=6, label='Simulated BER')
+    
+    if theoretical_ber is not None:
+        plt.semilogy(snr_range, theoretical_ber, 'r--', linewidth=2, label='Theoretical BPSK BER')
+    
+    plt.xlabel('SNR (dB)')
+    plt.ylabel('Bit Error Rate (BER)')
+    plt.title('BER vs SNR Characteristics')
+    plt.grid(True, which="both", ls="-", alpha=0.3)
+    plt.legend()
+    plt.ylim(1e-6, 1)
+    plt.show()
+
+def theoreticalBpskBer(snr_db):
+    """
+    Теоретическая BER для BPSK в AWGN канале
+    """
+    snr_lin = 10 ** (snr_db / 10.0)
+    return 0.5 * special.erfc(np.sqrt(snr_lin))
 
 # main function
 def main():
     # Parameters
-    size           = 12#2048               # bits in the signal
-    fft_size       = 12#2048               # size of fft (num of subc in OFDM)
+    fft_size       = 12#2048            # size of fft (num of subc in OFDM)
     subc_freq      = 15000.             # subcarrier distanse [Hz]
     light_vel      = 300000000.         # speed of light (3* 10^8 m/sec)
-    rx_vel         = 8000.              # speed of reseiver (first cosmic velocity)
+    rx_vel         = 80.              # speed of reseiver (first cosmic velocity)
     doppler_factor = rx_vel / light_vel # Doppler factor for the signal
-    snr            = 30                 # Signal to Noise Ratio [dB]
-
-    # Precompute Doppler subcarrier multyplyers
+    num_experiments= 10000
+    
+    # Calculate Doppler
+    #doppler_exp = [1] * fft_size
     doppler_exp = preCalcDoppler(fft_size, subc_freq, doppler_factor)
 
-    # 1) Generate bits
-    bits = genBits(size)
+    num_snr = 10
+    snr_vals = [0] * num_snr
+    ber_vals = [0] * num_snr
+    ber_theor = [0] * num_snr
 
-    # 2) Modulation
-    modBits = bpsk(bits)
+    for i in range(num_snr):
+        print(f"{i+1}/10")
+        snr_vals[i] = i
+        ber_vals[i] = calculatePoint(fft_size, snr_vals[i], num_experiments, doppler_exp)
+        ber_theor[i] = theoreticalBpskBer(snr_vals[i])
 
-    # 3) IFFT
-    spectrum = np.fft.ifft(modBits, fft_size)
+    print(f"snr vals: {snr_vals}")
+    print(f"ber vals: {ber_vals}")
 
-    # 4) We need to insert Doppler shift on each subc
-    # i subc: s[i] = s[i] * exp(2 * Pi * j * fd[i]), where fd[i] = i * subc_freq * V / c
-    specDoppler = spectrum #np.multiply(spectrum, doppler_exp)
+    plotBer(snr_vals, ber_vals, ber_theor)
 
-    # 5) AWGN incertion
-    noiseSignal = noiseInsertion(specDoppler, snr)
-
-    # 6) FFT
-    signalRx = np.fft.fft(noiseSignal, fft_size)
-
-    # 7) Demodulation
-    outBits = bpskDemapper(signalRx)
-
-    # 8) Statictics
-    persent = calcDemProb(bits, outBits)
-
-    print(f"Output persent: {persent}")
 
 main()
 
