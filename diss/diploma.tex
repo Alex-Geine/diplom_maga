@@ -4,7 +4,12 @@
 \begin{document}
 
 % Включение титульного листа (первая страница файла Title.pdf)
-   % \includepdf[pages={1-1}]{extra/Title.pdf}
+\includepdf[pages={1-1}]{extra/Title.pdf}
+
+% Оглавление
+\newpage % Начать с новой страницы
+\tableofcontents
+\newpage % Следующий текст тоже с новой страницы
 
 % Аннотация, Содержание, Введение
 \input{chapters/0_introduction.tex}
