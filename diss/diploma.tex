@@ -21,14 +21,45 @@
 %\input{chapters/chapter_4.tex}
 
 % Заключение
-\input{chapters/conclusion.tex}
+\input{chapters/3_conclusion.tex}
 
-% Библиографический список
-%\input{chapters/bibliography.tex}
-\bibliographystyle{unsrt}
-\bibliography{biblio/bibliography.bib}
+\newpage
+% Если используете класс report/book — оставляйте \chapter*. 
+% Если класс article — замените на \section*
+%------------------------------------------------------------------------------------
+\newpage
+\begin{center}
+  \textbf{\large СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ}
+\end{center}
+\refstepcounter{chapter}
+\addcontentsline{toc}{chapter}{СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ}
+%------------------------------------------------------------------------------------
 
-% Приложение (может быть пустым)
-%\input{chapters/appendix.tex}
+
+\begin{enumerate}
+    \item \label{steputin20216g_v1} 
+    Степутин А. Д., Николаев А. Н. Мобильная связь на пути к 6G: в 2 т. Т. 1. Москва; Вологда: Инфра-Инженерия, 2021. 416 с.
+
+    \item \label{maykov2014vliyanie} 
+    Майков Д. Ю., Вершинин А. С. Влияние эффектов Доплера на OFDM сигнал // Молодой ученый. 2014. № 21(80). С. 175–179.
+
+    \item \label{panko2018poliak} 
+    Панько С. П., Поляк М. Г. Исследование битовых ошибок, обусловленных эффектом Доплера // Космическое приборостроение. 2018. Т. 2, № 2. С. 105–110.
+
+    \item \label{Zhuravleva2021} 
+    Журавлёва Л. М., Нилов М. А., Лошкарев В. Л., Левшунов В. В. Оценка влияния эффекта Доплера на качество радиосвязи в условиях высокоскоростного движения // Мир транспорта. 2021. Т. 18, № 4. С. 54–71.
+
+    \item \label{Dahlman2011} 
+    Dahlman E., Parkvall S., Sk\"{o}ld J. Background of LTE // 4G LTE/LTE-Advanced for Mobile Broadband. Elsevier, 2011. P. 1–13.
+
+    \item \label{Sesia2009} 
+    LTE: The UMTS Long Term Evolution / Ed. by Stefania Sesia, Issam Toufik, Matthew Baker. Hoboken, NJ: Wiley-Blackwell, 2009.
+
+    \item \label{Li2018} 
+    Li K., Sun Z., Ning X., Diao M. Analysis of doppler frequency shift response mechanism based on OFDM system // MATEC Web of Conferences. 2018. Vol. 232.
+
+\item \label{Goldsmith2005} 
+    Goldsmith A. Wireless Communications. Cambridge University Press, 2005. P. 82-83.
+\end{enumerate}
 
 \end{document}

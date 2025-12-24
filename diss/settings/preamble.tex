@@ -8,13 +8,12 @@ times % use Times font as main
 \usepackage[T2A]{fontenc} % поддержка кириллицы
 \usepackage[utf8]{inputenc} % кодировка исходного текста
 \usepackage[english,russian]{babel} % переключение языков
-\usepackage{siunitx}
 
 % Геометрия страницы и графика
-\usepackage[left=3cm, right=1cm, top=2cm, bottom=2cm]{geometry} % поля страницы
+\usepackage[left=3cm, right=1.5cm, top=2cm, bottom=2cm]{geometry} % поля страницы
 \usepackage{graphicx} % подключение графики
 \usepackage{pdfpages} % вставка pdf-страниц
-\usepackage{placeins}
+
 % Таблицы
 \usepackage{array} % расширенные возможности для работы с таблицами
 \usepackage{tabularx} % автоматический подбор ширины столбцов
@@ -67,3 +66,20 @@ times % use Times font as main
 % Установка стилей страницы и главы
 \pagestyle{footcenter}
 \chapterpagestyle{footcenter}
+
+\usepackage{titlesec} % Для центрирования
+\titleformat{\section}
+  {\normalfont\normalsize\bfseries\centering} % стиль: шрифт, размер, жирный, центр
+  {\thesection}                          % ярлык (номер)
+  {1em}                                  % расстояние от номера до текста
+  {}                                     % код перед заголовком
+
+% Настройка отступов (обязательно при ошибке Format/spacing not found)
+% {команда}{левый отступ}{отступ сверху}{отступ снизу}
+% Сделаем минимальные отступы, например, 2 строки сверху и 1 снизу
+\titlespacing*{\section}
+  {0pt}                % Отступ слева
+  {6pt plus 4pt minus 2pt} % Отступ сверху (был 3.5ex, стал значительно меньше)
+  {6pt plus 4pt minus 2pt}  % Отступ снизу (был 2.3ex)
+
+\usepackage[section]{placeins}
