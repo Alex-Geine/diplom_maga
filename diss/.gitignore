@@ -279,4 +279,4 @@ TSWLatexianTemp*
 .vscode/
 
 # pdf output
-/*.pdf
+#/*.pdf
