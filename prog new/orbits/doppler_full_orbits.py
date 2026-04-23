@@ -3,18 +3,18 @@ import matplotlib.pyplot as plt
 from scipy.integrate import odeint
 
 # --- Константы ---
-MU = 3.986e14
+MU      = 3.986e14
 R_EARTH = 6371000
-C = 299792458.0
+C       = 299792458.0
 OMEGA_E = 7.2921e-5
 
 def get_orbit_data(a_km, e, i_deg, duration_h):
-    """Моделирование орбиты и расчет доплера"""
+    """Моделирование доплера относительно неподвижной точки в пространстве"""
     a = a_km * 1000
-    t = np.linspace(0, duration_h * 3600, 5000)
+    t = np.linspace(0, duration_h * 3600, 10000)
     i = np.radians(i_deg)
     
-    # Начальное состояние (в перигее)
+    # Состояние спутника
     rp = a * (1 - e)
     vp = np.sqrt(MU * (2/rp - 1/a))
     state0 = [rp, 0, 0, 0, vp * np.cos(i), vp * np.sin(i)]
@@ -27,31 +27,29 @@ def get_orbit_data(a_km, e, i_deg, duration_h):
     
     states = odeint(diff_eq, state0, t)
     
-    # Координаты пользователя (Москва для примера)
+    # Фиксированные координаты пользователя в инерциальном пространстве
     user_lat = np.radians(55.75)
-    user_pos_fixed = R_EARTH * np.array([np.cos(user_lat), 0, np.sin(user_lat)])
+    user_pos = R_EARTH * np.array([np.cos(user_lat), 0, np.sin(user_lat)])
     
     doppler_norm = []
-    for j, time in enumerate(t):
-        theta = OMEGA_E * time
-        cos_t, sin_t = np.cos(theta), np.sin(theta)
+    for j in range(len(t)):
+        sat_pos = states[j, :3]
+        sat_vel = states[j, 3:6]
         
-        # Поворот в ECEF
-        pos_i, vel_i = states[j, :3], states[j, 3:6]
-        pos_e = np.array([pos_i[0]*cos_t + pos_i[1]*sin_t, -pos_i[0]*sin_t + pos_i[1]*cos_t, pos_i[2]])
+        # Вектор от пользователя к спутнику
+        rel_pos = sat_pos - user_pos
         
-        # Учет вращения Земли в векторе скорости
-        v_frame = np.array([-OMEGA_E * pos_e[1], OMEGA_E * pos_e[0], 0])
-        vel_e = np.array([vel_i[0]*cos_t + vel_i[1]*sin_t, -vel_i[0]*sin_t + vel_i[1]*cos_t, vel_i[2]]) - v_frame
-        
-        rel_pos = pos_e - user_pos_fixed
-        if np.dot(rel_pos, user_pos_fixed) > 0: # Видимость
-            v_radial = np.dot(vel_e, rel_pos) / np.linalg.norm(rel_pos)
-            doppler_norm.append(-v_radial / C * 1e6) # в ppm
+        # Условие видимости: спутник выше линии горизонта (угол между rel_pos и user_pos < 90°)
+        if np.dot(rel_pos, user_pos) > 0:
+            # Проекция вектора скорости спутника на вектор дальности
+            v_radial = np.dot(sat_vel, rel_pos) / np.linalg.norm(rel_pos)
+            doppler_norm.append(-v_radial / C * 1e6)
         else:
             doppler_norm.append(np.nan)
             
     return t / 3600, np.array(doppler_norm)
+
+
 
 # --- Параметры ---
 orbits = {
