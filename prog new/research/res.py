@@ -5,6 +5,40 @@ from scipy.io import savemat
 import os
 import datetime
 
+# ------------------------------ Конфигурация 5G NR NTN (таблица) ------------------------------
+# Структура: для каждого диапазона, полосы и SCS -> количество RB
+# L/S диапазоны (n255/n256), SCS 15 и 30 кГц
+ls_config = {
+    5:  {15: 25,  30: 11},
+    10: {15: 52,  30: 24},
+    15: {15: 79,  30: 38},
+    20: {15: 106, 30: 51}
+}
+# Ka диапазон (n510/511/512), SCS 60 и 120 кГц
+ka_config = {
+    50:  {60: 66,  120: 32},
+    100: {60: 132, 120: 66},
+    200: {60: 264, 120: 132},
+    400: {120: 264}   # для 400 МГц и SCS 60 не определено по 3GPP
+}
+
+def get_fft_size(band, bw_mhz, scs_khz):
+    """
+    Возвращает FFT size = количество поднесущих = RB * 12.
+    band: 'L_S' или 'Ka'
+    bw_mhz: полоса в МГц (5,10,15,20 для L_S; 50,100,200,400 для Ka)
+    scs_khz: 15,30,60,120
+    """
+    if band == 'L_S':
+        rb = ls_config.get(bw_mhz, {}).get(scs_khz)
+    elif band == 'Ka':
+        rb = ka_config.get(bw_mhz, {}).get(scs_khz)
+    else:
+        raise ValueError("Неподдерживаемый диапазон. Используйте 'L_S' или 'Ka'")
+    if rb is None:
+        raise ValueError(f"Для {band} BW={bw_mhz} МГц, SCS={scs_khz} кГц нет данных в таблице 3GPP")
+    return rb * 12   # число поднесущих (RE на один OFDM символ)
+
 # ------------------------------ Классы ------------------------------
 class OFDMTx:
     """OFDM передатчик с BPSK и IFFT"""
@@ -13,14 +47,14 @@ class OFDMTx:
 
     def map(self, bits):
         """BPSK: 0 -> -1, 1 -> +1"""
-        return 2 * bits - 1  # (0->-1, 1->1)
+        return 2 * bits - 1
 
     def ifft(self, symbols):
-        """Обратное БПФ с сохранением энергии (ортогональное преобразование)"""
+        """Обратное БПФ с ортонормировкой"""
         return np.fft.ifft(symbols, norm='ortho')
 
     def transmit(self, bits):
-        """Полный цикл передачи: биты -> символы -> IFFT -> временной сигнал"""
+        """биты -> символы -> временной сигнал"""
         symbols = self.map(bits)
         signal = self.ifft(symbols)
         return signal
@@ -32,181 +66,148 @@ class OFDMRx:
         self.fft_size = fft_size
 
     def fft(self, signal):
-        """Прямое БПФ с сохранением энергии"""
         return np.fft.fft(signal, norm='ortho')
 
     def demap(self, symbols):
-        """Жёсткая демодуляция BPSK: real > 0 -> 1, иначе 0"""
         return (np.real(symbols) > 0).astype(int)
 
 
 class Channel:
-    """Канал с AWGN (плоский)"""
+    """Плоский канал с AWGN"""
     def __init__(self, snr_db):
         self.snr_db = snr_db
-        # Мощность сигнала на входе канала предполагается равной 1 (после ортонормированного IFFT)
         self.snr_lin = 10 ** (snr_db / 10.0)
-        self.N0 = 1.0 / self.snr_lin  # дисперсия комплексного шума
+        self.N0 = 1.0 / self.snr_lin   # дисперсия шума на комплексную выборку
 
     def add_noise(self, signal):
-        """Добавить комплексный белый гауссов шум с дисперсией N0 на комплексную выборку"""
         noise = np.sqrt(self.N0 / 2) * (np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape))
         return signal + noise
 
 
-# ------------------------------ Вспомогательные функции ------------------------------
-def ber_awgn_theoretical(snr_lin):
-    """Теоретическая BER для BPSK в AWGN"""
+# ------------------------------ Теоретические функции ------------------------------
+def ber_awgn(snr_lin):
     return 0.5 * erfc(np.sqrt(snr_lin))
 
-def bler_theoretical(bits_per_block, snr_lin):
-    """Теоретическая BLER для блока независимых битов (BPSK, AWGN)"""
-    ber = ber_awgn_theoretical(snr_lin)
-    return 1 - (1 - ber) ** bits_per_block
+def bler_theoretical(fft_size, snr_lin):
+    ber = ber_awgn(snr_lin)
+    return 1 - (1 - ber) ** fft_size
 
+def shannon_capacity(snr_lin):
+    return np.log2(1 + snr_lin)   # бит/с/Гц
+
+
+# ------------------------------ Симуляция для одного SNR ------------------------------
 def simulate_snr(snr_db, fft_size, num_trials):
-    """Симуляция для одного значения SNR"""
     tx = OFDMTx(fft_size)
     rx = OFDMRx(fft_size)
     channel = Channel(snr_db)
 
     total_bit_errors = 0
-    total_blocks = 0
     block_errors = 0
-    throughput_per_trial = []  # доля успешных битов в каждом опыте
 
     for _ in range(num_trials):
-        # Генерация случайных бит
         bits_tx = np.random.randint(0, 2, fft_size)
-
-        # Передача
         signal_td = tx.transmit(bits_tx)
-
-        # Канал
         signal_rx_td = channel.add_noise(signal_td)
-
-        # Приём
         symbols_rx = rx.fft(signal_rx_td)
         bits_rx = rx.demap(symbols_rx)
 
-        # Подсчёт ошибок
         errors = np.sum(bits_tx != bits_rx)
         total_bit_errors += errors
-        total_blocks += 1
         if errors > 0:
             block_errors += 1
 
-        # Доля успешных битов в текущем опыте
-        success_rate = 1.0 - errors / fft_size
-        throughput_per_trial.append(success_rate)
-
     ber = total_bit_errors / (fft_size * num_trials)
     bler = block_errors / num_trials
-    return ber, bler, throughput_per_trial
+    throughput = 1 - ber   # бит/с/Гц для BPSK
+    return ber, bler, throughput
 
 
 # ------------------------------ Основной скрипт ------------------------------
 if __name__ == "__main__":
+    # ------------------ Выбор конфигурации 5G NTN ------------------
+    # Параметры (можно менять)
+    BAND = 'L_S'          # 'L_S' или 'Ka'
+    BW_MHZ = 10           # для L_S: 5,10,15,20; для Ka: 50,100,200,400
+    SCS_KHZ = 30          # для L_S: 15 или 30; для Ka: 60 или 120
+
+    # Вычисляем FFT size на основе таблицы
+    try:
+        FFT_SIZE = get_fft_size(BAND, BW_MHZ, SCS_KHZ)
+        print(f"Конфигурация: {BAND}, BW={BW_MHZ} МГц, SCS={SCS_KHZ} кГц → FFT size = {FFT_SIZE} поднесущих")
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        exit(1)
+
     # Параметры симуляции
-    FFT_SIZE = 64
-    SNR_DB_LIST = np.arange(0, 11, 1)      # от 0 до 10 дБ с шагом 1
+    SNR_DB_LIST = np.arange(0, 11, 1)   # 0..10 дБ
     NUM_TRIALS = 1000
 
     # Запуск симуляции
     results = {}
     for snr in SNR_DB_LIST:
         print(f"Симуляция SNR = {snr} дБ...")
-        ber, bler, thr_vals = simulate_snr(snr, FFT_SIZE, NUM_TRIALS)
-        results[snr] = {
-            'ber': ber,
-            'bler': bler,
-            'throughput_vals': thr_vals
-        }
-        print(f"  BER = {ber:.5f}, BLER = {bler:.5f}")
+        ber, bler, thr = simulate_snr(snr, FFT_SIZE, NUM_TRIALS)
+        results[snr] = {'ber': ber, 'bler': bler, 'throughput': thr}
+        print(f"  BER = {ber:.5f}, BLER = {bler:.5f}, Throughput = {thr:.5f} бит/с/Гц")
 
     # Теоретические кривые
     snr_lin_vals = 10 ** (np.array(SNR_DB_LIST) / 10.0)
-    ber_theory = ber_awgn_theoretical(snr_lin_vals)
     bler_theory = bler_theoretical(FFT_SIZE, snr_lin_vals)
-    shannon_capacity = np.log2(1 + snr_lin_vals)  # бит/с/Гц
+    capacity_theory = shannon_capacity(snr_lin_vals)
 
-    # ------------------------------ Построение графика BLER vs SNR ------------------------------
+    # Извлекаем симуляционные значения
+    bler_sim = [results[s]['bler'] for s in SNR_DB_LIST]
+    throughput_sim = [results[s]['throughput'] for s in SNR_DB_LIST]
+
+    # ------------------------------ Построение BLER vs SNR ------------------------------
     plt.figure(figsize=(8, 6))
-    plt.semilogy(SNR_DB_LIST, [results[s]['bler'] for s in SNR_DB_LIST], 'bo-', label='Симуляционный BLER')
-    plt.semilogy(SNR_DB_LIST, bler_theory, 'r--', label='Теоретический BLER (на основе BER)')
+    plt.semilogy(SNR_DB_LIST, bler_sim, 'bo-', label='Симуляция BLER')
+    plt.semilogy(SNR_DB_LIST, bler_theory, 'r--', label='Теоретический BLER (BPSK, AWGN)')
     plt.xlabel('SNR, дБ')
     plt.ylabel('BLER')
-    plt.title('Вероятность ошибки в блоке (BLER)')
+    plt.title(f'Вероятность ошибки в блоке (BLER) для {BAND}, BW={BW_MHZ} МГц, SCS={SCS_KHZ} кГц')
     plt.grid(True, which='both', linestyle='--', alpha=0.7)
     plt.legend()
     plt.tight_layout()
 
-    # Сохраняем первый график
-    date_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = f"plots_{date_str}"
-    os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, "BLER_vs_SNR.png"), dpi=150)
-    plt.close()
-
-    # ------------------------------ Построение графика Throughput vs CDF ------------------------------
-    # Выбираем 4 характерных значения SNR для наглядности
-    selected_snrs = [0, 3, 6, 10]
-    # Для выбранных SNR строим эмпирические CDF
+    # ------------------------------ Построение Throughput vs SNR ------------------------------
     plt.figure(figsize=(8, 6))
-    for snr in selected_snrs:
-        if snr not in results:
-            continue
-        thr_vals = np.array(results[snr]['throughput_vals'])
-        # Сортировка для CDF
-        thr_sorted = np.sort(thr_vals)
-        cdf = np.arange(1, len(thr_sorted) + 1) / len(thr_sorted)
-        plt.step(thr_sorted, cdf, label=f'SNR = {snr} дБ', where='post')
-    plt.xlabel('Throughput (доля успешных битов)')
-    plt.ylabel('CDF')
-    plt.title('Эмпирическая функция распределения пропускной способности')
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "Throughput_CDF.png"), dpi=150)
-    plt.close()
-
-    # ------------------------------ Дополнительно: Throughput vs SNR с емкостью Шеннона ------------------------------
-    # (не требовалось, но полезно для понимания)
-    plt.figure(figsize=(8, 6))
-    avg_throughput = [1 - results[s]['ber'] for s in SNR_DB_LIST]
-    plt.plot(SNR_DB_LIST, avg_throughput, 'bo-', label='Система BPSK-OFDM (1 - BER)')
-    plt.plot(SNR_DB_LIST, shannon_capacity, 'r--', label='Ёмкость Шеннона (бит/с/Гц)')
+    plt.plot(SNR_DB_LIST, throughput_sim, 'bo-', label='Симуляционный throughput (1-BER)')
+    plt.plot(SNR_DB_LIST, capacity_theory, 'r--', label='Ёмкость Шеннона (бит/с/Гц)')
     plt.xlabel('SNR, дБ')
     plt.ylabel('Throughput, бит/с/Гц')
-    plt.title('Средняя пропускная способность')
+    plt.title(f'Пропускная способность для {BAND}, BW={BW_MHZ} МГц, SCS={SCS_KHZ} кГц')
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     plt.tight_layout()
+
+    # ------------------------------ Сохранение результатов ------------------------------
+    # Создаём папку с датой и временем
+    date_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_dir = f"NTN_results_{BAND}_{BW_MHZ}MHz_{SCS_KHZ}kHz_{date_str}"
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Сохраняем графики
+    plt.figure(1)
+    plt.savefig(os.path.join(save_dir, "BLER_vs_SNR.png"), dpi=150)
+    plt.figure(2)
     plt.savefig(os.path.join(save_dir, "Throughput_vs_SNR.png"), dpi=150)
-    plt.close()
+    plt.close('all')
 
-    # ------------------------------ Сохранение данных в .mat ------------------------------
-    # Подготовка данных для экспорта
+    # Сохраняем данные в .mat
     mat_data = {
+        'config_band': BAND,
+        'config_bw_mhz': BW_MHZ,
+        'config_scs_khz': SCS_KHZ,
+        'fft_size': FFT_SIZE,
         'snr_db': SNR_DB_LIST,
-        'bler_sim': np.array([results[s]['bler'] for s in SNR_DB_LIST]),
+        'bler_simulation': np.array(bler_sim),
         'bler_theory': bler_theory,
-        'ber_sim': np.array([results[s]['ber'] for s in SNR_DB_LIST]),
-        'ber_theory': ber_theory,
-        'throughput_cdf': {},   # для каждого SNR сохраняем значения и CDF
+        'throughput_simulation': np.array(throughput_sim),
+        'shannon_capacity': capacity_theory
     }
-    for snr in selected_snrs:
-        if snr in results:
-            thr_vals = np.array(results[snr]['throughput_vals'])
-            thr_sorted = np.sort(thr_vals)
-            cdf = np.arange(1, len(thr_sorted) + 1) / len(thr_sorted)
-            mat_data[f'throughput_vals_snr{snr}'] = thr_vals
-            mat_data[f'throughput_sorted_snr{snr}'] = thr_sorted
-            mat_data[f'cdf_snr{snr}'] = cdf
-
-    # Добавим средний throughput и шенноновскую ёмкость
-    mat_data['avg_throughput'] = avg_throughput
-    mat_data['shannon_capacity'] = shannon_capacity
-
     savemat(os.path.join(save_dir, 'simulation_data.mat'), mat_data)
+
     print(f"\nРезультаты сохранены в папку: {save_dir}")
+    print("Содержит: BLER_vs_SNR.png, Throughput_vs_SNR.png, simulation_data.mat")
