@@ -5,129 +5,135 @@ from scipy.io import savemat
 import os
 import datetime
 
-# ------------------------------ Конфигурация 5G NR NTN (таблица RB) ------------------------------
-# L/S диапазоны (n255/n256)
+# ----------------------------- Таблица CP (в отсчетах) -----------------------------
+# Для разных размеров FFT: normal CP (символы 1-6,8-13) и extended CP (символы 0,7)
+cp_table = {
+    512:  {'normal': 36, 'extended': 40},
+    1024: {'normal': 72, 'extended': 80},
+    2048: {'normal': 144, 'extended': 160},
+    4096: {'normal': 288, 'extended': 320}
+}
+
+def get_cp_length(fft_size, cp_type='normal'):
+    """Возвращает длину CP в отсчётах для заданного FFT."""
+    if fft_size not in cp_table:
+        raise ValueError(f"Размер FFT {fft_size} не поддерживается. Допустимы: {list(cp_table.keys())}")
+    return cp_table[fft_size][cp_type]
+
+# ----------------------------- Таблица RB для 5G NTN -----------------------------
 ls_rb_table = {
     5:  {15: 25,  30: 11},
     10: {15: 52,  30: 24},
     15: {15: 79,  30: 38},
     20: {15: 106, 30: 51}
 }
-# Ka диапазон (n510/511/512)
 ka_rb_table = {
     50:  {60: 66,  120: 32},
     100: {60: 132, 120: 66},
     200: {60: 264, 120: 132},
-    400: {120: 264}   # для 400 МГц SCS=60 кГц не определено
+    400: {120: 264}
 }
 
 def get_rb(band, bw_mhz, scs_khz):
-    """Возвращает количество RB по таблице 3GPP"""
     if band == 'L_S':
         return ls_rb_table.get(bw_mhz, {}).get(scs_khz)
     elif band == 'Ka':
         return ka_rb_table.get(bw_mhz, {}).get(scs_khz)
-    else:
-        raise ValueError("band должен быть 'L_S' или 'Ka'")
+    return None
 
 def get_fft_size_from_re(num_re):
-    """Выбор минимальной степени двойки > num_re, но не менее 64"""
+    """Минимальная степень двойки > num_re (не менее 64)"""
     n = 64
     while n <= num_re:
         n *= 2
     return n
 
-# ------------------------------ Классы ------------------------------
+# ----------------------------- Классы с поддержкой CP -----------------------------
 class OFDMTx:
-    """OFDM передатчик с BPSK, центрированием поднесущих и IFFT"""
-    def __init__(self, num_re, fft_size):
-        self.num_re = num_re          # количество используемых поднесущих
-        self.fft_size = fft_size      # размер БПФ (степень двойки)
-        # Смещение: размещаем RE в центре
+    def __init__(self, num_re, fft_size, cp_type='normal'):
+        self.num_re = num_re
+        self.fft_size = fft_size
+        self.cp_len = get_cp_length(fft_size, cp_type)
         self.offset = (fft_size - num_re) // 2
 
     def map(self, bits):
-        """BPSK: 0 → -1, 1 → +1"""
         return 2 * bits - 1
 
     def ifft(self, symbols_re):
-        """Размещение RE в центре, zero padding, IFFT с ортонормировкой"""
-        freq_domain = np.zeros(self.fft_size, dtype=complex)
-        freq_domain[self.offset:self.offset + self.num_re] = symbols_re
-        return np.fft.ifft(freq_domain, norm='ortho')
+        freq = np.zeros(self.fft_size, dtype=complex)
+        freq[self.offset:self.offset + self.num_re] = symbols_re
+        return np.fft.ifft(freq, norm='ortho')
+
+    def add_cp(self, time_signal):
+        """Добавить циклический префикс: последние cp_len отсчётов в начало"""
+        return np.concatenate([time_signal[-self.cp_len:], time_signal])
 
     def transmit(self, bits):
-        """Биты → BPSK-символы → разнесение по частоте → IFFT"""
         symbols = self.map(bits)
-        return self.ifft(symbols)
+        ofdm_symbol = self.ifft(symbols)
+        return self.add_cp(ofdm_symbol)
 
 
 class OFDMRx:
-    """OFDM приёмник: FFT, извлечение центральных поднесущих, BPSK демодуляция"""
-    def __init__(self, num_re, fft_size):
+    def __init__(self, num_re, fft_size, cp_type='normal'):
         self.num_re = num_re
         self.fft_size = fft_size
+        self.cp_len = get_cp_length(fft_size, cp_type)
         self.offset = (fft_size - num_re) // 2
 
+    def remove_cp(self, rx_signal):
+        """Удалить циклический префикс"""
+        return rx_signal[self.cp_len:self.cp_len + self.fft_size]
+
     def fft(self, time_signal):
-        """Прямое БПФ с ортонормировкой"""
         return np.fft.fft(time_signal, norm='ortho')
 
     def extract_re(self, freq_domain):
-        """Извлечение только центральных поднесущих, где были данные"""
         return freq_domain[self.offset:self.offset + self.num_re]
 
     def demap(self, symbols):
-        """Жёсткое решение BPSK: real > 0 → 1, иначе 0"""
         return (np.real(symbols) > 0).astype(int)
 
-    def receive(self, time_signal):
-        """Полный цикл приёма: FFT → извлечение RE → демодуляция"""
-        fd = self.fft(time_signal)
-        re_symbols = self.extract_re(fd)
+    def receive(self, rx_signal_with_cp):
+        signal_no_cp = self.remove_cp(rx_signal_with_cp)
+        freq = self.fft(signal_no_cp)
+        re_symbols = self.extract_re(freq)
         return self.demap(re_symbols)
 
 
 class Channel:
-    """Плоский канал с аддитивным белым гауссовым шумом (AWGN)"""
     def __init__(self, snr_db):
         self.snr_db = snr_db
         self.snr_lin = 10 ** (snr_db / 10.0)
-        self.N0 = 1.0 / self.snr_lin   # дисперсия комплексного шума на выборку
+        self.N0 = 1.0 / self.snr_lin
 
     def add_noise(self, signal):
-        """Добавить комплексный белый шум"""
         noise = np.sqrt(self.N0/2) * (np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape))
         return signal + noise
 
 
-# ------------------------------ Теоретические кривые ------------------------------
+# ----------------------------- Теоретические функции -----------------------------
 def ber_awgn(snr_lin):
-    """Теоретическая BER для BPSK в AWGN"""
     return 0.5 * erfc(np.sqrt(snr_lin))
 
-def bler_theoretical(num_bits_per_block, snr_lin):
-    """BLER для блока независимых битов (идеальное перемежение)"""
+def bler_theoretical(num_bits, snr_lin):
     ber = ber_awgn(snr_lin)
-    return 1 - (1 - ber) ** num_bits_per_block
+    return 1 - (1 - ber) ** num_bits
 
 def shannon_capacity(snr_lin):
-    """Ёмкость Шеннона для комплексного канала (бит/с/Гц)"""
     return np.log2(1 + snr_lin)
 
 
-# ------------------------------ Симуляция для одного SNR ------------------------------
+# ----------------------------- Симуляция одного SNR -----------------------------
 def simulate_snr(snr_db, tx, rx, channel, num_trials):
-    """Симуляция для заданного SNR и готовых объектов передатчика/приёмника"""
     total_bit_errors = 0
     block_errors = 0
 
     for _ in range(num_trials):
         bits_tx = np.random.randint(0, 2, tx.num_re)
-        signal_td = tx.transmit(bits_tx)
-        signal_rx_td = channel.add_noise(signal_td)
-        bits_rx = rx.receive(signal_rx_td)
-
+        signal_td = tx.transmit(bits_tx)           # с CP
+        signal_rx = channel.add_noise(signal_td)   # с CP
+        bits_rx = rx.receive(signal_rx)            # внутри удаляется CP
         errors = np.sum(bits_tx != bits_rx)
         total_bit_errors += errors
         if errors > 0:
@@ -135,99 +141,99 @@ def simulate_snr(snr_db, tx, rx, channel, num_trials):
 
     ber = total_bit_errors / (tx.num_re * num_trials)
     bler = block_errors / num_trials
-    # Спектральная эффективность: (1 - BER) * (количество бит на символ) * (RE/FFT)
-    # Для BPSK бит/символ = 1. Умножаем на долю занятых поднесущих.
-    throughput = (1 - ber) * (tx.num_re / tx.fft_size)   # бит/с/Гц
+    # Спектральная эффективность с учётом CP:
+    # На один OFDM символ приходится fft_size + cp_len отсчётов,
+    # из них полезные отсчёты (данные) только fft_size. Полезные поднесущие: num_re.
+    # Throughput = (1 - BER) * (num_re полезных бит) / (общее число отсчётов)
+    #             = (1 - BER) * (num_re) / (fft_size + cp_len)
+    throughput = (1 - ber) * tx.num_re / (tx.fft_size + tx.cp_len)
     return ber, bler, throughput
 
 
-# ------------------------------ Основной скрипт ------------------------------
+# ----------------------------- Основной скрипт -----------------------------
 if __name__ == "__main__":
-    # ------------------------- Выбор конфигурации 5G NTN -------------------------
-    BAND = 'L_S'          # 'L_S' или 'Ka'
-    BW_MHZ = 10           # МГц (см. таблицу)
-    SCS_KHZ = 30          # кГц (см. таблицу)
+    # Конфигурация 5G NTN
+    BAND = 'L_S'           # 'L_S' или 'Ka'
+    BW_MHZ = 10            # МГц
+    SCS_KHZ = 30           # кГц
 
-    # Получаем количество RB из таблицы 3GPP
     rb = get_rb(BAND, BW_MHZ, SCS_KHZ)
     if rb is None:
-        print(f"Ошибка: нет данных для {BAND}, BW={BW_MHZ} МГц, SCS={SCS_KHZ} кГц")
+        print(f"Ошибка: нет RB для {BAND} BW={BW_MHZ} МГц SCS={SCS_KHZ} кГц")
         exit(1)
 
-    num_re = rb * 12            # число ресурсных элементов (поднесущих) на один OFDM-символ
-    fft_size = get_fft_size_from_re(num_re)   # физический размер БПФ (степень двойки)
+    num_re = rb * 12
+    fft_size = get_fft_size_from_re(num_re)
+    cp_type = 'normal'      # используем стандартный CP для всех символов
 
     print(f"Конфигурация: {BAND}, BW={BW_MHZ} МГц, SCS={SCS_KHZ} кГц")
     print(f"  → RB = {rb}, RE = {num_re}")
-    print(f"  → FFT size = {fft_size} (ближайшая степень двойки > {num_re})")
+    print(f"  → FFT size = {fft_size}, CP length = {get_cp_length(fft_size, cp_type)} отсчётов")
     print(f"  → Защитные поднесущие: {(fft_size - num_re)//2} слева и справа")
 
-    # Параметры симуляции
-    SNR_DB_LIST = np.arange(0, 11, 1)   # 0...10 дБ
+    SNR_DB_LIST = np.arange(0, 11, 1)    # 0..10 дБ
     NUM_TRIALS = 1000
 
-    # Создаём передатчик и приёмник (одинаковы для всех SNR)
-    tx = OFDMTx(num_re, fft_size)
-    rx = OFDMRx(num_re, fft_size)
+    tx = OFDMTx(num_re, fft_size, cp_type)
+    rx = OFDMRx(num_re, fft_size, cp_type)
 
-    # Запуск по всем SNR
     results = {}
     for snr in SNR_DB_LIST:
-        print(f"\nСимуляция SNR = {snr} дБ ...")
+        print(f"Симуляция SNR = {snr} дБ ...")
         channel = Channel(snr)
         ber, bler, thr = simulate_snr(snr, tx, rx, channel, NUM_TRIALS)
         results[snr] = {'ber': ber, 'bler': bler, 'throughput': thr}
-        print(f"  BER = {ber:.5f}, BLER = {bler:.5f}, Throughput = {thr:.4f} бит/с/Гц")
+        print(f"  BER = {ber:.5f}, BLER = {bler:.5f}, Throughput = {thr:.6f} бит/с/Гц")
 
-    # Теоретические кривые (на основе SNR на поднесущую)
+    # Теоретические кривые
     snr_lin_vals = 10 ** (np.array(SNR_DB_LIST) / 10.0)
-    bler_theory = bler_theoretical(num_re, snr_lin_vals)   # блок из num_re бит
+    bler_theory = bler_theoretical(num_re, snr_lin_vals)
     shannon = shannon_capacity(snr_lin_vals)
 
-    # Извлекаем симуляционные значения
+    # Извлекаем результаты
     snr_list = list(results.keys())
-    ber_sim = [results[s]['ber'] for s in snr_list]
     bler_sim = [results[s]['bler'] for s in snr_list]
-    throughput_sim = [results[s]['throughput'] for s in snr_list]
+    thr_sim = [results[s]['throughput'] for s in snr_list]
 
-    # ------------------------------ Построение графиков ------------------------------
-    # 1) BLER vs SNR
+    # Построение BLER vs SNR
     plt.figure(figsize=(8, 6))
-    plt.semilogy(snr_list, bler_sim, 'bo-', label='Симуляция')
+    plt.semilogy(snr_list, bler_sim, 'bo-', label='Симуляция (с CP)')
     plt.semilogy(snr_list, bler_theory, 'r--', label='Теория (независимые биты)')
     plt.xlabel('SNR, дБ')
     plt.ylabel('BLER')
     plt.title(f'BLER для {BAND}, BW={BW_MHZ} МГц, SCS={SCS_KHZ} кГц\n'
-              f'RE = {num_re}, FFT = {fft_size}')
+              f'RE = {num_re}, FFT = {fft_size}, CP = {tx.cp_len} отсчётов')
     plt.grid(True, which='both', linestyle='--', alpha=0.7)
     plt.legend()
     plt.tight_layout()
     bler_fig = plt.gcf()
 
-    # 2) Throughput vs SNR (сравнение с ёмкостью Шеннона)
+    # Throughput vs SNR + Шеннон
     plt.figure(figsize=(8, 6))
-    plt.plot(snr_list, throughput_sim, 'bo-', label='BPSK-OFDM (центрированные RE)')
+    plt.plot(snr_list, thr_sim, 'bo-', label='BPSK-OFDM с CP')
     plt.plot(snr_list, shannon, 'r--', label='Ёмкость Шеннона (бит/с/Гц)')
+    # Также можно нарисовать верхнюю границу без учёта BER: (1 - 0) * num_re/(fft_size+cp_len)
+    max_thr = num_re / (fft_size + tx.cp_len)
+    plt.axhline(y=max_thr, color='gray', linestyle=':', label=f'Макс. спектр. эффективность = {max_thr:.3f}')
     plt.xlabel('SNR, дБ')
     plt.ylabel('Throughput, бит/с/Гц')
-    plt.title(f'Пропускная способность для {BAND}, BW={BW_MHZ} МГц, SCS={SCS_KHZ} кГц\n'
-              f'RE/FFT = {num_re}/{fft_size} = {num_re/fft_size:.2f}')
+    plt.title(f'Пропускная способность с учётом CP\n'
+              f'RE/FFT = {num_re}/{fft_size}, CP = {tx.cp_len} отсч. → фактор {max_thr:.3f}')
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     plt.tight_layout()
     thr_fig = plt.gcf()
 
-    # ------------------------------ Сохранение ------------------------------
-    # Папка с датой и временем + параметрами
+    # Сохранение
     date_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = f"NTN_{BAND}_{BW_MHZ}MHz_{SCS_KHZ}kHz_{date_str}"
+    save_dir = f"NTN_CP_{BAND}_{BW_MHZ}MHz_{SCS_KHZ}kHz_{date_str}"
     os.makedirs(save_dir, exist_ok=True)
 
     bler_fig.savefig(os.path.join(save_dir, "BLER_vs_SNR.png"), dpi=150)
     thr_fig.savefig(os.path.join(save_dir, "Throughput_vs_SNR.png"), dpi=150)
     plt.close('all')
 
-    # Сохраняем данные в .mat
+    # Данные для MATLAB
     mat_data = {
         'config': {
             'band': BAND,
@@ -236,13 +242,14 @@ if __name__ == "__main__":
             'num_rb': rb,
             'num_re': num_re,
             'fft_size': fft_size,
+            'cp_length': tx.cp_len,
+            'max_spectral_efficiency': max_thr
         },
         'snr_db': np.array(snr_list),
-        'ber_sim': np.array(ber_sim),
         'bler_sim': np.array(bler_sim),
         'bler_theory': bler_theory,
-        'throughput_sim': np.array(throughput_sim),
-        'shannon_capacity': shannon,
+        'throughput_sim': np.array(thr_sim),
+        'shannon_capacity': shannon
     }
     savemat(os.path.join(save_dir, 'simulation_data.mat'), mat_data)
 
