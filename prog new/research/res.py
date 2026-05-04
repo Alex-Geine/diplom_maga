@@ -257,7 +257,7 @@ class TDLChannel:
         max_power = -np.inf
         time_shift = 0
         for gain_lin, delay in zip(self.path_gains_lin, self.delays_samples):
-            amp = np.sqrt(gain_lin) #* path_loss_factor
+            amp = 1 # np.sqrt(gain_lin) #* path_loss_factor
             phase = 2 * np.pi * np.random.rand()
             h[delay] += amp * np.exp(1j * phase)
             power = gain_lin * (path_loss_factor**2)
@@ -271,6 +271,7 @@ class TDLChannel:
         h_full = np.zeros(self.fft_size, dtype=complex)
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
+        H_freq = np.ones(self.fft_size, dtype=complex)
 
         signal_no_cp = tx_signal #[self.cp_len:self.cp_len + self.fft_size]
         X_freq = np.fft.fft(signal_no_cp, norm='ortho')
@@ -296,10 +297,10 @@ class TDLChannel:
         P_signal = np.mean(np.abs(rx_signal_with_cp)**2)
         N0 = P_signal / snr_lin
         noise = np.sqrt(N0/2) * (np.random.randn(*rx_signal_with_cp.shape) + 1j*np.random.randn(*rx_signal_with_cp.shape))
-        # p_noise= np.mean(np.abs(noise)**2)
-        # rx_signal_with_cp #+= noise
+        p_noise= np.mean(np.abs(noise)**2)
+        rx_signal_with_cp += noise
 
-        N0 = 0
+        # N0 = 0
         # Y = np.fft.fft(rx_signal_with_cp, norm='ortho')
 
         # H_conj = np.conj(H_re)
@@ -316,7 +317,7 @@ class TDLChannel:
         #H_conj = np.conj(H_re)
         #X_hat = H_conj / (np.abs(H_re)**2 + N0) * Y_re_comp
 
-        return rx_signal_with_cp, H_freq, N0, time_shift
+        return rx_signal_with_cp, H_freq, p_noise, time_shift
 
 # ========================= 5. Теоретические кривые =========================
 def ber_awgn_qam(snr_lin, mod_type):
@@ -374,7 +375,7 @@ if __name__ == "__main__":
     TDL_PROFILE = 'C'          # 'A', 'B', 'C'
 
     # Параметры симуляции
-    SNR_DB_LIST = np.arange(1, 20, 2)   # 0..20 дБ шаг 2
+    SNR_DB_LIST = np.arange(0, 20, 2)   # 0..20 дБ шаг 2
     NUM_TRIALS = 1000           # число OFDM-символов на SNR
 
     # Расчёт конфигурации
