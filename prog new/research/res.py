@@ -142,7 +142,7 @@ class OFDMTx:
         freq[self.offset:self.offset+self.num_re] = symbols
         time_signal = np.fft.ifft(freq, norm='ortho')
         # добавить CP
-        return np.concatenate([time_signal[-self.cp_len:], time_signal])
+        return time_signal#np.concatenate([time_signal[-self.cp_len:], time_signal])
 
 class OFDMRx:
     def __init__(self, num_re, fft_size, cp_type='normal', mod_type='QPSK'):
@@ -153,17 +153,29 @@ class OFDMRx:
         self.mod_type = mod_type
         self.bps = bits_per_symbol(mod_type)
 
-    def receive(self, rx_signal, H_freq, N0):
-        # удалить CP
-        signal = rx_signal[self.cp_len:self.cp_len+self.fft_size]
-        Y = np.fft.fft(signal, norm='ortho')
-        Y_re = Y[self.offset:self.offset+self.num_re]
-        H_re = H_freq[self.offset:self.offset+self.num_re]
-        # MMSE эквалайзер
-        H_conj = np.conj(H_re)
-        X_hat = H_conj / (np.abs(H_re)**2 + N0) * Y_re
-        bits = demodulate(X_hat, self.mod_type)
-        return bits
+    def receive(self, rx_signal, H_freq, N0, time_shift=0):
+            # Удаляем CP
+            signal = rx_signal #[self.cp_len:self.cp_len + self.fft_size]
+            Y = np.fft.fft(signal, norm='ortho')
+            Y_re = Y[self.offset:self.offset + self.num_re]
+            H_re = H_freq[self.offset:self.offset + self.num_re]
+
+            # Компенсация временного сдвига: фазовая коррекция для каждой поднесущей
+            # Для каждой поднесущей k (локальный индекс внутри num_re) глобальный индекс = offset + k
+            k_global = np.arange(self.offset, self.offset + self.num_re)
+            # Компенсация: умножение на exp(1j * 2π * k * time_shift / fft_size)
+            phase_comp = np.exp(1j * 2 * np.pi * k_global * time_shift / self.fft_size)
+            Y_re_comp = Y_re * phase_comp
+
+            # MMSE эквалайзер
+            H_conj = np.conj(H_re)
+            X_hat = H_conj / (np.abs(H_re)**2 + N0) * Y_re_comp
+
+            # print("Y_equ_n = [" + ", ".join(map(str, Y_re_comp)).replace('j', 'i') + "];")
+            # print("X_equ_n = [" + ", ".join(map(str, X_hat)).replace('j', 'i') + "];")
+
+            bits = demodulate(X_hat, self.mod_type)
+            return bits
 
 # ========================= 4. TDL канал для 5G NTN =========================
 # Профили TDL-A, B, C из 3GPP TR 38.901 (задержки в нс, мощности в дБ)
@@ -215,6 +227,7 @@ class TDLChannel:
         self.max_delay = np.max(self.delays_samples)
         # Длина импульсной характеристики (с учётом возможной дополнительной задержки)
         self.ir_len = self.max_delay + 1
+        print(self.max_delay)
 
     def get_path_loss_factor(self):
         """
@@ -224,7 +237,7 @@ class TDLChannel:
         Ps_db = np.random.normal(0, self.shadowing_std_db)
         total_loss_db = self.Pd_db + Ps_db
         P_lin = 10 ** (-total_loss_db / 10.0)
-        return np.sqrt(P_lin)   # потому что h(t) умножается на sqrt(P)
+        return np.sqrt(1)   # потому что h(t) умножается на sqrt(P)
 
     def get_impulse_response(self):
         """Возвращает комплексную импульсную характеристику канала (в отсчётах) с учётом потерь."""
@@ -237,36 +250,73 @@ class TDLChannel:
             h[delay] += amp * np.exp(1j * phase)
         return h
 
+    def get_impulse_response_with_delay(self):
+        """Возвращает (h, time_shift_samples) где time_shift_samples - задержка основного луча (в отсчётах)"""
+        path_loss_factor = self.get_path_loss_factor()
+        h = np.zeros(self.ir_len, dtype=complex)
+        max_power = -np.inf
+        time_shift = 0
+        for gain_lin, delay in zip(self.path_gains_lin, self.delays_samples):
+            amp = np.sqrt(gain_lin) #* path_loss_factor
+            phase = 2 * np.pi * np.random.rand()
+            h[delay] += amp * np.exp(1j * phase)
+            power = gain_lin * (path_loss_factor**2)
+            if power > max_power:
+                max_power = power
+                time_shift = delay       # отсчёт задержки самого мощного луча
+        return h, time_shift
+
     def apply(self, tx_signal, snr_lin):
-        # 1. Извлекаем полезный OFDM-символ (удаляем CP)
-        signal_no_cp = tx_signal[self.cp_len:self.cp_len + self.fft_size]
-
-        # 2. БПФ переданного символа
-        X_freq = np.fft.fft(signal_no_cp, norm='ortho')
-
-        # 3. Импульсная характеристика канала
-        h = self.get_impulse_response()
+        h, time_shift = self.get_impulse_response_with_delay()
         h_full = np.zeros(self.fft_size, dtype=complex)
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
 
-        # 4. Прохождение через канал (умножение спектров)
+        signal_no_cp = tx_signal #[self.cp_len:self.cp_len + self.fft_size]
+        X_freq = np.fft.fft(signal_no_cp, norm='ortho')
         Y_freq = X_freq * H_freq
 
-        # 5. Обратное БПФ для получения временного сигнала после канала (без шума)
+        # H_conj = np.conj(H_freq)
+        # X_hat = H_conj / (np.abs(H_freq)**2) * Y_freq
+
+        # print("Y_re_comp = [" + ", ".join(map(str, Y_freq)).replace('j', 'i') + "];")
+        # print("X_hat = [" + ", ".join(map(str, X_hat)).replace('j', 'i') + "];")
+
+
+        # print("X_freq: ", X_freq)
+        # print("Y_freq: ", Y_freq)
+        # print("X_hat: ", X_hat)
+
         y_time_no_noise = np.fft.ifft(Y_freq, norm='ortho')
 
-        # 6. Восстанавливаем CP (копируем последние cp_len отсчётов)
-        cp = y_time_no_noise[-self.cp_len:]
-        rx_signal_with_cp = np.concatenate([cp, y_time_no_noise])
+        # cp = y_time_no_noise[-self.cp_len:]
+        rx_signal_with_cp = y_time_no_noise #np.concatenate([cp, y_time_no_noise])
 
-        # 7. Мощность принятого сигнала и добавление шума
-        P_rx = np.mean(np.abs(rx_signal_with_cp)**2)
-        N0 = P_rx / snr_lin
+        # Мощность сигнала ДО добавления шума
+        P_signal = np.mean(np.abs(rx_signal_with_cp)**2)
+        N0 = P_signal / snr_lin
         noise = np.sqrt(N0/2) * (np.random.randn(*rx_signal_with_cp.shape) + 1j*np.random.randn(*rx_signal_with_cp.shape))
-        rx_signal_with_cp += noise
+        # p_noise= np.mean(np.abs(noise)**2)
+        # rx_signal_with_cp #+= noise
 
-        return rx_signal_with_cp, H_freq, N0
+        N0 = 0
+        # Y = np.fft.fft(rx_signal_with_cp, norm='ortho')
+
+        # H_conj = np.conj(H_re)
+        # X_hat = H_conj / (np.abs(H_freq)**2 + N0) * Y
+
+        # print("X_equ = [" + ", ".join(map(str, X_hat)).replace('j', 'i') + "];")
+        # print("Y_equ = [" + ", ".join(map(str, Y)).replace('j', 'i') + "];")
+
+        # PNoiseSig = np.mean(np.abs(rx_signal_with_cp)**2)
+
+        # snr = 1. / (PNoiseSig / P_signal - 1.)
+        # print("snr: ", 10 * np.log10(snr))
+        # print("snr n: ", 10 * np.log10(P_signal / p_noise))
+        #H_conj = np.conj(H_re)
+        #X_hat = H_conj / (np.abs(H_re)**2 + N0) * Y_re_comp
+
+        return rx_signal_with_cp, H_freq, N0, time_shift
 
 # ========================= 5. Теоретические кривые =========================
 def ber_awgn_qam(snr_lin, mod_type):
@@ -296,8 +346,8 @@ def simulate_snr(snr_db, tx, rx, tdl_channel, num_trials):
     for _ in range(num_trials):
         bits_tx = np.random.randint(0, 2, bits_per_block)
         tx_signal = tx.transmit(bits_tx)
-        rx_signal, H_freq, N0 = tdl_channel.apply(tx_signal, snr_lin)
-        bits_rx = rx.receive(rx_signal, H_freq, N0)
+        rx_signal, H_freq, N0, time_shift = tdl_channel.apply(tx_signal, snr_lin)
+        bits_rx = rx.receive(rx_signal, H_freq, N0, time_shift)
         errors = np.sum(bits_tx != bits_rx)
         total_bit_errors += errors
         if errors > 0:
@@ -324,7 +374,7 @@ if __name__ == "__main__":
     TDL_PROFILE = 'C'          # 'A', 'B', 'C'
 
     # Параметры симуляции
-    SNR_DB_LIST = np.arange(0, 21, 2)   # 0..20 дБ шаг 2
+    SNR_DB_LIST = np.arange(1, 20, 2)   # 0..20 дБ шаг 2
     NUM_TRIALS = 1000           # число OFDM-символов на SNR
 
     # Расчёт конфигурации
