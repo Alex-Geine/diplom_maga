@@ -169,8 +169,15 @@ class OFDMRx:
 
             # MMSE эквалайзер
             H_conj = np.conj(H_re)
-            X_hat = H_conj / (np.abs(H_re)**2 + N0) * Y_re_comp
 
+            Noise = np.eye(H_re.shape[0]) * N0
+            print("Noise: ")
+            print(Noise)
+
+            X_hat = H_conj / (np.abs(H_re)**2 + Noise) * Y_re_comp
+            print("X_hat: ")
+            print(X_hat)
+ 
             # print("Y_equ_n = [" + ", ".join(map(str, Y_re_comp)).replace('j', 'i') + "];")
             # print("X_equ_n = [" + ", ".join(map(str, X_hat)).replace('j', 'i') + "];")
 
@@ -272,6 +279,12 @@ class TDLChannel:
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
         H_freq = np.ones(self.fft_size, dtype=complex)
+
+        # print("H_freq: ");
+        # print(H_freq);
+
+        # print("|H_freq|^2: ");
+        # print(np.abs(H_freq)**2);
 
         signal_no_cp = tx_signal #[self.cp_len:self.cp_len + self.fft_size]
         X_freq = np.fft.fft(signal_no_cp, norm='ortho')
@@ -375,8 +388,8 @@ if __name__ == "__main__":
     TDL_PROFILE = 'C'          # 'A', 'B', 'C'
 
     # Параметры симуляции
-    SNR_DB_LIST = np.arange(0, 20, 2)   # 0..20 дБ шаг 2
-    NUM_TRIALS = 1000           # число OFDM-символов на SNR
+    SNR_DB_LIST = np.arange(0, 1, 1)       # 0..20 дБ шаг 2
+    NUM_TRIALS = 1           # число OFDM-символов на SNR
 
     # Расчёт конфигурации
     rb = get_rb(BAND, BW_MHZ, SCS_KHZ)
