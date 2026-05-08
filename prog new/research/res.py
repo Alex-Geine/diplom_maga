@@ -140,7 +140,7 @@ class OFDMTx:
         symbols = modulate(bits, self.mod_type)
         freq = np.zeros(self.fft_size, dtype=complex)
         freq[self.offset:self.offset+self.num_re] = symbols
-        time_signal = np.fft.ifft(freq, norm='ortho')
+        time_signal = freq #np.fft.ifft(freq, norm='ortho')
         # добавить CP
         return time_signal#np.concatenate([time_signal[-self.cp_len:], time_signal])
 
@@ -156,7 +156,7 @@ class OFDMRx:
     def receive(self, rx_signal, H_freq, N0, time_shift=0):
             # Удаляем CP
             signal = rx_signal #[self.cp_len:self.cp_len + self.fft_size]
-            Y = np.fft.fft(signal, norm='ortho')
+            Y = signal #np.fft.fft(signal, norm='ortho')
             Y_re = Y[self.offset:self.offset + self.num_re]
             H_re = H_freq[self.offset:self.offset + self.num_re]
 
@@ -170,13 +170,9 @@ class OFDMRx:
             # MMSE эквалайзер
             H_conj = np.conj(H_re)
 
-            Noise = np.eye(H_re.shape[0]) * N0
-            print("Noise: ")
-            print(Noise)
-
-            X_hat = H_conj / (np.abs(H_re)**2 + Noise) * Y_re_comp
-            print("X_hat: ")
-            print(X_hat)
+            X_hat = Y_re #H_conj / (np.abs(H_re)**2 + N0) * Y_re_comp
+            # print("X_hat: ")
+            # print(list(X_hat))
  
             # print("Y_equ_n = [" + ", ".join(map(str, Y_re_comp)).replace('j', 'i') + "];")
             # print("X_equ_n = [" + ", ".join(map(str, X_hat)).replace('j', 'i') + "];")
@@ -264,7 +260,7 @@ class TDLChannel:
         max_power = -np.inf
         time_shift = 0
         for gain_lin, delay in zip(self.path_gains_lin, self.delays_samples):
-            amp = 1 # np.sqrt(gain_lin) #* path_loss_factor
+            amp = np.sqrt(gain_lin) * path_loss_factor
             phase = 2 * np.pi * np.random.rand()
             h[delay] += amp * np.exp(1j * phase)
             power = gain_lin * (path_loss_factor**2)
@@ -278,6 +274,7 @@ class TDLChannel:
         h_full = np.zeros(self.fft_size, dtype=complex)
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
+        # print("H: ", np.array(H_freq))
         H_freq = np.ones(self.fft_size, dtype=complex)
 
         # print("H_freq: ");
@@ -286,9 +283,11 @@ class TDLChannel:
         # print("|H_freq|^2: ");
         # print(np.abs(H_freq)**2);
 
-        signal_no_cp = tx_signal #[self.cp_len:self.cp_len + self.fft_size]
-        X_freq = np.fft.fft(signal_no_cp, norm='ortho')
+        # signal_no_cp = tx_signal #[self.cp_len:self.cp_len + self.fft_size]
+        X_freq = tx_signal #np.fft.fft(signal_no_cp, norm='ortho')
         Y_freq = X_freq * H_freq
+
+        rx_signal_with_cp = Y_freq
 
         # H_conj = np.conj(H_freq)
         # X_hat = H_conj / (np.abs(H_freq)**2) * Y_freq
@@ -301,16 +300,22 @@ class TDLChannel:
         # print("Y_freq: ", Y_freq)
         # print("X_hat: ", X_hat)
 
-        y_time_no_noise = np.fft.ifft(Y_freq, norm='ortho')
+        # y_time_no_noise = np.fft.ifft(Y_freq, norm='ortho')
 
         # cp = y_time_no_noise[-self.cp_len:]
-        rx_signal_with_cp = y_time_no_noise #np.concatenate([cp, y_time_no_noise])
+        # rx_signal_with_cp = y_time_no_noise #np.concatenate([cp, y_time_no_noise])
 
         # Мощность сигнала ДО добавления шума
         P_signal = np.mean(np.abs(rx_signal_with_cp)**2)
+        # print("P_signal: ", P_signal)
+        snr_db = 5
+        snr_lin = 10**(snr_db/10.0)
+        # print("snr_lin: ", snr_lin)
         N0 = P_signal / snr_lin
         noise = np.sqrt(N0/2) * (np.random.randn(*rx_signal_with_cp.shape) + 1j*np.random.randn(*rx_signal_with_cp.shape))
         p_noise= np.mean(np.abs(noise)**2)
+        # print("p_noise: ", p_noise)
+        # print("snr: ", 10 * np.log10(P_signal / p_noise))
         rx_signal_with_cp += noise
 
         # N0 = 0
@@ -330,7 +335,7 @@ class TDLChannel:
         #H_conj = np.conj(H_re)
         #X_hat = H_conj / (np.abs(H_re)**2 + N0) * Y_re_comp
 
-        return rx_signal_with_cp, H_freq, p_noise, time_shift
+        return rx_signal_with_cp, H_freq, N0, time_shift
 
 # ========================= 5. Теоретические кривые =========================
 def ber_awgn_qam(snr_lin, mod_type):
@@ -388,8 +393,8 @@ if __name__ == "__main__":
     TDL_PROFILE = 'C'          # 'A', 'B', 'C'
 
     # Параметры симуляции
-    SNR_DB_LIST = np.arange(0, 1, 1)       # 0..20 дБ шаг 2
-    NUM_TRIALS = 1           # число OFDM-символов на SNR
+    SNR_DB_LIST = np.arange(0, 20, 1)       # 0..20 дБ шаг 2
+    NUM_TRIALS = 1000           # число OFDM-символов на SNR
 
     # Расчёт конфигурации
     rb = get_rb(BAND, BW_MHZ, SCS_KHZ)
