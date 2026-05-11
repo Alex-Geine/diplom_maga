@@ -5,6 +5,123 @@ from scipy.io import savemat
 import os
 import datetime
 
+def viterbi_decode(soft_bits, generator_matrix):
+    """
+    Декодер Витерби с soft-решениями для кода (2,1,7)
+    soft_bits: массив LLR значений (положительные = 0, отрицательные = 1)
+    """
+    poly1 = int(str(generator_matrix[0][0]), 8)
+    poly2 = int(str(generator_matrix[0][1]), 8)
+    
+    num_states = 64  # 2^6
+    memory = 6
+    
+    # Инициализация метрик путей
+    path_metrics = np.full(num_states, np.inf)
+    path_metrics[0] = 0
+    
+    # Хранение истории переходов
+    traceback = []
+    
+    # Каждый входной бит даёт 2 выходных бита
+    num_input_bits = len(soft_bits) // 2 - memory  # минус хвост
+    
+    for step in range(num_input_bits + memory):
+        # Получаем soft-значения для двух выходных битов
+        idx = step * 2
+        if idx + 1 >= len(soft_bits):
+            break
+        soft0 = soft_bits[idx]
+        soft1 = soft_bits[idx + 1]
+        
+        # Метрики перехода для всех возможных битов на выходе
+        branch_metrics = np.zeros((num_states, 2))
+        
+        transitions = []
+        
+        for prev_state in range(num_states):
+            for input_bit in [0, 1]:
+                # Вычисляем выходные биты кодера
+                state = ((prev_state << 1) & 0x7F) | input_bit
+                out0 = bin(state & poly1).count('1') % 2
+                out1 = bin(state & poly2).count('1') % 2
+                
+                # Евклидово расстояние между ожидаемым и принятым
+                # Для BPSK: 0 -> +1, 1 -> -1
+                expected0 = 1 if out0 == 0 else -1
+                expected1 = 1 if out1 == 0 else -1
+                
+                # LLR в BPSK символы (стандартное преобразование)
+                received0 = np.tanh(soft0 / 2)  # приближение
+                received1 = np.tanh(soft1 / 2)
+                
+                metric = (expected0 - received0)**2 + (expected1 - received1)**2
+                
+                next_state = (state & 0x3F)  # младшие 6 бит
+                transitions.append((prev_state, next_state, input_bit, metric))
+        
+        # Алгоритм Витерби: выбор лучшего пути
+        new_metrics = np.full(num_states, np.inf)
+        best_bits = [None] * num_states
+        
+        for prev_state, next_state, input_bit, metric in transitions:
+            candidate = path_metrics[prev_state] + metric
+            if candidate < new_metrics[next_state]:
+                new_metrics[next_state] = candidate
+                best_bits[next_state] = (input_bit, prev_state)
+        
+        path_metrics = new_metrics
+        traceback.append(best_bits)
+    
+    # Traceback: находим путь с минимальной метрикой
+    best_state = np.argmin(path_metrics)
+    decoded = []
+    
+    for step in range(len(traceback) - 1, -1, -1):
+        bit, best_state = traceback[step][best_state]
+        decoded.insert(0, bit)
+    
+    # Команда для скачивания: 
+    # from commpy.filters import rrcosfilter
+    return np.array(decoded[:num_input_bits])
+
+
+def plot_channel(data):
+    plt.stem(np.abs(data))
+    plt.title("Модуль сигнала")
+    plt.ylabel("Амплитуда")
+    plt.show()
+
+def plot_constellation(samples, title="Сигнальное созвездие"):
+    """
+    Визуализирует созвездие по комплексным отсчетам.
+    :param samples: массив комплексных чисел (IQ-отсчеты)
+    """
+    samples = np.array(samples)
+    
+    # Извлекаем действительную (I) и мнимую (Q) части
+    i_coords = samples.real
+    q_coords = samples.imag
+
+    plt.figure(figsize=(7, 7))
+    # Рисуем точки (s - размер, alpha - прозрачность для плотных областей)
+    plt.scatter(i_coords, q_coords, color='blue', s=10, alpha=0.5, label='Отсчеты')
+    
+    # Настройка осей и сетки
+    plt.axhline(0, color='black', linewidth=1)
+    plt.axvline(0, color='black', linewidth=1)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    
+    plt.title(title)
+    plt.xlabel("In-phase (I)")
+    plt.ylabel("Quadrature (Q)")
+    
+    # Делаем масштаб осей одинаковым, чтобы созвездие не искажалось
+    plt.axis('equal') 
+    plt.legend()
+    plt.show()
+
+
 # ========================= 1. Параметры 5G NTN =========================
 # Таблица CP
 cp_table = {
@@ -135,9 +252,60 @@ class OFDMTx:
         self.mod_type = mod_type
         self.bps = bits_per_symbol(mod_type)
 
+        # Параметры свёрточного кода (стандартный (2,1,7) как в 802.11)
+        self.trellis = {
+            'memory': 6,           # 2^6 = 64 состояния
+            'generator_matrix': np.array([[0o171, 0o133]])  # 133, 171 в восьмеричной
+        }
+
+        self.constraint_length = 7
+        self.code_rate         = 1/2       # один бит входа -> два бита выхода
+        
+        # Перемежитель (блочный)
+        self.interleaver_size = fft_size
+
+    def conv_encode(self, bits):
+        """
+        Свёрточное кодирование (собственная реализация)
+        """
+        generator_matrix = self.trellis['generator_matrix']
+        poly1 = generator_matrix[0][0]  # 0o133 = 91
+        poly2 = generator_matrix[0][1]  # 0o171 = 121
+
+        memory = 6
+        state = 0
+        coded_bits = []
+        
+        for bit in bits:
+            state = ((state << 1) & 0x7F) | int(bit)
+            out1 = bin(state & poly1).count('1') % 2
+            out2 = bin(state & poly2).count('1') % 2
+            coded_bits.extend([out1, out2])
+        
+        # Хвостовые биты для сброса состояния
+        for _ in range(memory):
+            state = (state << 1) & 0x7F
+            out1 = bin(state & poly1).count('1') % 2
+            out2 = bin(state & poly2).count('1') % 2
+            coded_bits.extend([out1, out2])
+        
+        return np.array(coded_bits)
+
+    def encode(self, bits):
+        """Свёрточное кодирование + перемежение"""
+        # Кодирование (k=1, n=2)
+        coded_bits = self.conv_encode(bits)
+        
+        # Перемежение для борьбы с пакетными ошибками
+        # interleaved = interleaver(coded_bits, self.interleaver_size)
+        
+        return coded_bits
+
     def transmit(self, bits):
-        # bits: массив длины num_re * bps
-        symbols = modulate(bits, self.mod_type)
+        enc_bits = self.encode(bits)
+
+        # bits: массив длины num_re * 2 * bps
+        symbols = modulate(enc_bits, self.mod_type)
         freq = np.zeros(self.fft_size, dtype=complex)
         freq[self.offset:self.offset+self.num_re] = symbols
         time_signal = freq #np.fft.ifft(freq, norm='ortho')
@@ -153,32 +321,59 @@ class OFDMRx:
         self.mod_type = mod_type
         self.bps = bits_per_symbol(mod_type)
 
-    def receive(self, rx_signal, H_freq, N0, time_shift=0):
-            # Удаляем CP
-            signal = rx_signal #[self.cp_len:self.cp_len + self.fft_size]
-            Y = signal #np.fft.fft(signal, norm='ortho')
+    def decode(self, rx_symbols, H_re, N0):
+        """Декодирование с софт-решениями (LLR)"""
+        # Шаг 1: Эквалайзер (ваш существующий MMSE)
+        alfa = 5
+        denominator = np.abs(H_re)**2 + N0 * alfa
+        W = np.conj(H_re) / denominator
+        X_hat = W * rx_symbols
+        
+        # Шаг 2: Вычисление LLR (логарифмов отношения правдоподобия)
+        llr = self.calculate_llr(X_hat, N0, W, H_re)
+        
+        # Шаг 3: Деперемежение
+        deinterleaved = deinterleaver(llr, self.interleaver_size)
+        
+        # Шаг 4: Декодер Витерби (софт-решения)
+        decoded_bits = viterbi_decode(
+            deinterleaved, 
+            self.trellis['generator_matrix']
+        )
+        
+        return decoded_bits
+    
+    def calculate_llr(self, X_hat, N0, W, H_re):
+        """
+        Вычисление LLR для QPSK/16QAM
+        X_hat - отэквалайзированные символы
+        """
+        # Эффективное ОСШ после эквалайзера
+        snr_eff = np.abs(H_re)**2 / (N0 * np.abs(W)**2)
+        
+        if self.mod_type == 'BPSK':
+            # Для BPSK: LLR = 2 * Re(X_hat) / (N0 * |W|^2)
+            llr = 2 * np.real(X_hat) / (N0 * np.abs(W)**2)
+            
+        elif self.mod_type == 'QPSK':
+            # Разделяем I и Q компоненты
+            llr_i = 2 * np.real(X_hat) / (N0 * np.abs(W)**2)
+            llr_q = 2 * np.imag(X_hat) / (N0 * np.abs(W)**2)
+            llr = np.column_stack([llr_i, llr_q]).flatten()
+            
+        elif self.mod_type == '16QAM':
+            # Более сложный расчёт для 16QAM (можно упростить через приближение max-log)
+            llr = self.qam16_llr(X_hat, N0, W)
+            
+        return llr
+
+    def receive(self, rx_signal, H_freq, N0):
+            Y = rx_signal
             Y_re = Y[self.offset:self.offset + self.num_re]
             H_re = H_freq[self.offset:self.offset + self.num_re]
 
-            # Компенсация временного сдвига: фазовая коррекция для каждой поднесущей
-            # Для каждой поднесущей k (локальный индекс внутри num_re) глобальный индекс = offset + k
-            k_global = np.arange(self.offset, self.offset + self.num_re)
-            # Компенсация: умножение на exp(1j * 2π * k * time_shift / fft_size)
-            phase_comp = np.exp(1j * 2 * np.pi * k_global * time_shift / self.fft_size)
-            Y_re_comp = Y_re * phase_comp
-
-            # MMSE эквалайзер
-            H_conj = np.conj(H_re)
-
-            X_hat = Y_re #H_conj / (np.abs(H_re)**2 + N0) * Y_re_comp
-            # print("X_hat: ")
-            # print(list(X_hat))
- 
-            # print("Y_equ_n = [" + ", ".join(map(str, Y_re_comp)).replace('j', 'i') + "];")
-            # print("X_equ_n = [" + ", ".join(map(str, X_hat)).replace('j', 'i') + "];")
-
-            bits = demodulate(X_hat, self.mod_type)
-            return bits
+            bits = decode(self, Y_re, H_re, N0)
+            return [bits, H_re]
 
 # ========================= 4. TDL канал для 5G NTN =========================
 # Профили TDL-A, B, C из 3GPP TR 38.901 (задержки в нс, мощности в дБ)
@@ -274,68 +469,19 @@ class TDLChannel:
         h_full = np.zeros(self.fft_size, dtype=complex)
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
-        # print("H: ", np.array(H_freq))
-        H_freq = np.ones(self.fft_size, dtype=complex)
-
-        # print("H_freq: ");
-        # print(H_freq);
-
-        # print("|H_freq|^2: ");
-        # print(np.abs(H_freq)**2);
-
-        # signal_no_cp = tx_signal #[self.cp_len:self.cp_len + self.fft_size]
         X_freq = tx_signal #np.fft.fft(signal_no_cp, norm='ortho')
         Y_freq = X_freq * H_freq
 
         rx_signal_with_cp = Y_freq
 
-        # H_conj = np.conj(H_freq)
-        # X_hat = H_conj / (np.abs(H_freq)**2) * Y_freq
-
-        # print("Y_re_comp = [" + ", ".join(map(str, Y_freq)).replace('j', 'i') + "];")
-        # print("X_hat = [" + ", ".join(map(str, X_hat)).replace('j', 'i') + "];")
-
-
-        # print("X_freq: ", X_freq)
-        # print("Y_freq: ", Y_freq)
-        # print("X_hat: ", X_hat)
-
-        # y_time_no_noise = np.fft.ifft(Y_freq, norm='ortho')
-
-        # cp = y_time_no_noise[-self.cp_len:]
-        # rx_signal_with_cp = y_time_no_noise #np.concatenate([cp, y_time_no_noise])
-
         # Мощность сигнала ДО добавления шума
         P_signal = np.mean(np.abs(rx_signal_with_cp)**2)
-        # print("P_signal: ", P_signal)
-        snr_db = 5
-        snr_lin = 10**(snr_db/10.0)
-        # print("snr_lin: ", snr_lin)
         N0 = P_signal / snr_lin
         noise = np.sqrt(N0/2) * (np.random.randn(*rx_signal_with_cp.shape) + 1j*np.random.randn(*rx_signal_with_cp.shape))
         p_noise= np.mean(np.abs(noise)**2)
-        # print("p_noise: ", p_noise)
-        # print("snr: ", 10 * np.log10(P_signal / p_noise))
         rx_signal_with_cp += noise
 
-        # N0 = 0
-        # Y = np.fft.fft(rx_signal_with_cp, norm='ortho')
-
-        # H_conj = np.conj(H_re)
-        # X_hat = H_conj / (np.abs(H_freq)**2 + N0) * Y
-
-        # print("X_equ = [" + ", ".join(map(str, X_hat)).replace('j', 'i') + "];")
-        # print("Y_equ = [" + ", ".join(map(str, Y)).replace('j', 'i') + "];")
-
-        # PNoiseSig = np.mean(np.abs(rx_signal_with_cp)**2)
-
-        # snr = 1. / (PNoiseSig / P_signal - 1.)
-        # print("snr: ", 10 * np.log10(snr))
-        # print("snr n: ", 10 * np.log10(P_signal / p_noise))
-        #H_conj = np.conj(H_re)
-        #X_hat = H_conj / (np.abs(H_re)**2 + N0) * Y_re_comp
-
-        return rx_signal_with_cp, H_freq, N0, time_shift
+        return rx_signal_with_cp, H_freq, p_noise, time_shift
 
 # ========================= 5. Теоретические кривые =========================
 def ber_awgn_qam(snr_lin, mod_type):
@@ -360,16 +506,28 @@ def simulate_snr(snr_db, tx, rx, tdl_channel, num_trials):
     snr_lin = 10**(snr_db/10.0)
     total_bit_errors = 0
     block_errors = 0
-    bits_per_block = tx.num_re * tx.bps
+    bits_per_block = tx.num_re * tx.bps # code rate = 1/2
 
     for _ in range(num_trials):
         bits_tx = np.random.randint(0, 2, bits_per_block)
         tx_signal = tx.transmit(bits_tx)
         rx_signal, H_freq, N0, time_shift = tdl_channel.apply(tx_signal, snr_lin)
-        bits_rx = rx.receive(rx_signal, H_freq, N0, time_shift)
+        bits_rx, H_re = rx.receive(rx_signal, H_freq, N0)
         errors = np.sum(bits_tx != bits_rx)
         total_bit_errors += errors
+
+        errorsIds = np.where(bits_tx != bits_rx)[0]
+        # plot_channel(H_re)
+        # plot_channel(W)
+        # plot_constellation(equ_sig)
+        # plot_constellation(rx_signal)
+
+        print(f"Позиции ошибок: {errorsIds.tolist()}")
         if errors > 0:
+            # plot_channel(H_re)
+            # plot_channel(W)
+            # plot_constellation(equ_sig)
+            # plot_constellation(rx_signal)
             block_errors += 1
 
     ber = total_bit_errors / (bits_per_block * num_trials)
@@ -384,7 +542,7 @@ if __name__ == "__main__":
     BAND = 'L_S'               # 'L_S' или 'Ka'
     BW_MHZ = 10                # полоса, МГц
     SCS_KHZ = 30               # шаг поднесущих, кГц
-    MODULATION = 'QPSK'        # 'BPSK', 'QPSK', '16QAM', '64QAM', '256QAM'
+    MODULATION = 'BPSK'        # 'BPSK', 'QPSK', '16QAM', '64QAM', '256QAM'
 
     # Параметры орбиты и канала
     ORBIT_HEIGHT_KM = 600      # высота (расстояние) в км
@@ -393,8 +551,8 @@ if __name__ == "__main__":
     TDL_PROFILE = 'C'          # 'A', 'B', 'C'
 
     # Параметры симуляции
-    SNR_DB_LIST = np.arange(0, 20, 1)       # 0..20 дБ шаг 2
-    NUM_TRIALS = 1000           # число OFDM-символов на SNR
+    SNR_DB_LIST = np.arange(20, 21, 1)       # 0..20 дБ шаг 2
+    NUM_TRIALS = 100           # число OFDM-символов на SNR
 
     # Расчёт конфигурации
     rb = get_rb(BAND, BW_MHZ, SCS_KHZ)
@@ -403,6 +561,7 @@ if __name__ == "__main__":
         exit(1)
     num_re = rb * 12
     fft_size = get_fft_size_from_re(num_re)
+    fft_size *= 2 #due to code rate 1.2
     cp_type = 'normal'
 
     # Создаём передатчик и приёмник (статичные)
