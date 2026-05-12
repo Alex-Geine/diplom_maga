@@ -2,6 +2,52 @@ import numpy as np
 import matplotlib.pyplot as plt
 from numpy.random import RandomState
 
+import numpy as np
+
+# ---------- SoftDemapper (исправлен для BPSK) ----------
+class SoftDemapper:
+    def __init__(self, modulation):
+        self.modulation = modulation
+        if modulation == 'BPSK':
+            self.bits_per_symbol = 1
+            self.constellation = np.array([1, -1])
+            self.bits = np.array([[0], [1]])
+        elif modulation == 'QPSK':
+            self.bits_per_symbol = 2
+            self.constellation = np.array([1+1j, 1-1j, -1-1j, -1+1j]) / np.sqrt(2)
+            self.bits = np.array([[0,0],[0,1],[1,1],[1,0]])
+        elif modulation == '16QAM':
+            self.bits_per_symbol = 4
+            r = np.array([-3,-1,1,3])
+            self.constellation = np.array([x+1j*y for x in r for y in r]) / np.sqrt(10)
+            self.bits = self._gen_gray(4)
+        # ... остальные модуляции добавьте по необходимости
+
+    def _gen_gray(self, bps):
+        # заглушка – для 16,64,256 используйте свой словарь, либо верните как есть
+        raise NotImplementedError
+
+    def demap(self, rx_symbols, noise_variance):
+        rx_symbols = np.asarray(rx_symbols).flatten()
+        if self.modulation == 'BPSK':
+            # Простая и правильная формула для BPSK
+            return 2 * np.real(rx_symbols) / noise_variance
+        # Для остальных модуляций – универсальный max-log
+        if not np.iscomplexobj(rx_symbols):
+            rx_symbols = rx_symbols.astype(complex)
+        num_symbols = len(rx_symbols)
+        num_bits = num_symbols * self.bits_per_symbol
+        llr = np.zeros(num_bits)
+        for i, y in enumerate(rx_symbols):
+            dist = np.abs(y - self.constellation)**2
+            for bit in range(self.bits_per_symbol):
+                idx0 = np.where(self.bits[:, bit] == 0)[0]
+                idx1 = np.where(self.bits[:, bit] == 1)[0]
+                d0 = np.min(dist[idx0]) if idx0.size else np.inf
+                d1 = np.min(dist[idx1]) if idx1.size else np.inf
+                llr[i*self.bits_per_symbol + bit] = (d0 - d1) / (2 * noise_variance)
+        return llr
+
 # ------------------------------------------------------------
 #  Блочный перемежитель (случайная перестановка)
 # ------------------------------------------------------------
@@ -121,97 +167,74 @@ class ViterbiDecoder:
         decoded.reverse()
         return np.array(decoded[:block_len], dtype=int)
 
-
-# ------------------------------------------------------------
-#  Моделирование с перемежением и адаптивной остановкой
-# ------------------------------------------------------------
-def bpsk_modulate(bits):
-    return 1 - 2*bits.astype(float)
-
-def bpsk_demodulate_llr(rx, noise_var):
-    return 2 * rx / noise_var
-
-def simulate_with_interleaver(encoder, decoder, interleaver, snr_db,
+# ---------- Симуляция с комплексным шумом и внешним демодулятором ----------
+def simulate_with_interleaver(encoder, decoder, interleaver, demapper, snr_db,
                               frame_len=500, min_errors=150, max_bits=int(5e6)):
-    """
-    snr_db: отношение Eb/N0 в dB (для BPSK c R=1/2)
-    """
+    # SNR -> дисперсия шума на компоненту (I/Q)
     snr_lin = 10**(snr_db/10)
     code_rate = 0.5
     es_n0 = snr_lin * code_rate
-    noise_var = 1.0 / (2.0 * es_n0)   # BPSK, вещественный шум
+    noise_var = 1.0 / (2.0 * es_n0)   # дисперсия для реальной и мнимой части
 
     total_bits = 0
     total_errors = 0
 
-    max_num_trials = 1e4
     trials = 0
+    max_trials = 1e4
 
-    while (total_errors < min_errors and total_bits < max_bits) or trials < max_num_trials:
-        # 1. Информационные биты
-        info_bits = np.random.randint(0, 2, frame_len)
+    while total_errors < min_errors and total_bits < max_bits and trials < max_trials:
+        info = np.random.randint(0, 2, frame_len)
+        coded = encoder.encode(info)
+        inter, orig_len, pad = interleaver.interleave(coded)
 
-        # 2. Кодирование
-        coded_bits = encoder.encode(info_bits)   # длина = 2*frame_len + 2*memory
+        # Модуляция BPSK -> +1/-1, комплексные символы (мнимая часть 0)
+        tx = 1 - 2 * inter.astype(float)   # вещественные
+        tx = tx.astype(complex)            # теперь комплексные
 
-        # 3. Перемежение (кодированные биты)
-        interleaved_bits, orig_len, pad_len = interleaver.interleave(coded_bits)
+        # Комплексный AWGN
+        noise = np.sqrt(noise_var) * (np.random.randn(len(tx)) + 1j*np.random.randn(len(tx)))
+        rx = tx + noise
 
-        # 4. Модуляция
-        tx_signal = bpsk_modulate(interleaved_bits)
+        # Мягкая демодуляция
+        llr = demapper.demap(rx, noise_var)
 
-        # 5. AWGN канал
-        noise = np.sqrt(noise_var) * np.random.randn(len(tx_signal))
-        rx_signal = tx_signal + noise
+        # Деперемежение LLR
+        deinter_llr = interleaver.deinterleave(llr, orig_len, pad)
 
-        # 6. LLR демодуляция
-        llr = bpsk_demodulate_llr(rx_signal, noise_var)
+        # Декодирование
+        decoded = decoder.decode(deinter_llr, block_len=frame_len)
 
-        # 7. Деперемежение LLR (соответствующее перемежению битов)
-        deinterleaved_llr = interleaver.deinterleave(llr, orig_len, pad_len)
-
-        # 8. Декодирование Витерби
-        decoded_bits = decoder.decode(deinterleaved_llr, block_len=frame_len)
-
-        # 9. Подсчёт ошибок
-        errors = np.sum(info_bits != decoded_bits)
+        errors = np.sum(info != decoded)
         total_errors += errors
         total_bits += frame_len
-        trials+= 1
+        trials += 1
 
-    ber = total_errors / total_bits if total_bits > 0 else 0.0
-    return ber
-
+    return total_errors / total_bits if total_bits else 0.0
 
 def main():
-    snr_points_db = np.arange(0, 7, 1)   # 0 .. 6 dB
+    snr_db = np.arange(0, 7, 1)
     frame_len = 500
-    block_size = 1000   # размер блока перемежения (должен быть больше длины кадра?)
+    block_size = 1000
 
     encoder = ConvEncoder()
     decoder = ViterbiDecoder()
-    # Создаём перемежитель с фиксированным seed для воспроизводимости
-    interleaver = Interleaver(block_size=block_size, seed=123)
+    interleaver = Interleaver(block_size, seed=123)
+    demapper = SoftDemapper('BPSK')   # создаём один раз
 
-    ber_results = []
-    print("SNR(dB)   BER")
-    for snr in snr_points_db:
-        ber = simulate_with_interleaver(encoder, decoder, interleaver,
-                                        snr, frame_len=frame_len,
-                                        min_errors=150, max_bits=int(5e6))
-        ber_results.append(ber)
-        print(f"{snr:4.1f}      {ber:.2e}")
+    ber_list = []
+    for snr in snr_db:
+        ber = simulate_with_interleaver(encoder, decoder, interleaver, demapper,
+                                        snr, frame_len, min_errors=150, max_bits=int(5e6))
+        ber_list.append(ber)
+        print(f"{snr:3.1f} dB   BER = {ber:.2e}")
 
-    # Построение графика
-    plt.figure(figsize=(8,5))
-    plt.semilogy(snr_points_db, ber_results, 'o-', label='BER, soft Viterbi + interleaver')
-    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.semilogy(snr_db, ber_list, 'o-')
+    plt.grid(True)
     plt.xlabel('Eb/N0 (dB)')
     plt.ylabel('BER')
-    plt.title('Convolutional code (rate 1/2) with block interleaver, AWGN')
-    plt.legend()
-    plt.ylim([1e-5, 1])
+    plt.title('Convolutional code + interleaver, BPSK, AWGN')
+    plt.ylim([1e-6, 1])
     plt.show()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
