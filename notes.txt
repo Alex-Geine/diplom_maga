@@ -132,3 +132,8 @@ Throughput vs. SNR/SINR
 6) либо остановиться на нем, либо продолжить с LDPC
 7) Внедрить LDPC энкодер декодер и проделать тоже самое (если будет время)
 8) 
+
+Графики:
+- Spread:         BLER vs SNR vs velo, BLER vs SNR vs numRb
+- Shift:          BLER vs SNR vs freq_shift, BLER vs SNR vs param set from theory
+- Spread + Shift: ?
