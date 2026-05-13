@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Симуляция системы связи 5G NTN с поддержкой помехоустойчивого кодирования
-(свёрточный код + перемежитель + декодер Витерби)
+(свёрточный код + перемежитель + декодер Витерби + рейт-матчинг)
 
 Автор: [Ваше имя]
 Дата: 2026
@@ -295,6 +295,104 @@ class SoftDemapper:
         return llr
 
 
+# ------------------ Рейт-матчер (повторение/выкалывание) ------------------
+class RateMatcher:
+    """
+    Рейт-матчер для согласования длины кодированного блока с ресурсной ёмкостью.
+    Поддерживает повторение (если кодовый блок короче) и выкалывание (если длиннее).
+    """
+    
+    def __init__(self, modulation, num_symbols, code_rate=0.5):
+        """
+        :param modulation: тип модуляции ('BPSK', 'QPSK', ...)
+        :param num_symbols: количество доступных символов (Resource Elements)
+        :param code_rate: скорость кода (0.5 для свёрточного)
+        """
+        self.modulation = modulation
+        self.bps = bits_per_symbol(modulation)
+        self.num_symbols = num_symbols
+        self.capacity_bits = num_symbols * self.bps  # сколько бит можно передать
+        self.code_rate = code_rate
+        self.info_bits_per_block = int(self.capacity_bits * code_rate)
+        
+    def get_info_block_size(self):
+        """Возвращает максимальный размер информационного блока для данной конфигурации"""
+        return self.info_bits_per_block
+    
+    def rate_match(self, coded_bits):
+        """
+        Согласует длину кодированного блока с ёмкостью канала.
+        :param coded_bits: массив кодированных бит (от кодера)
+        :return: биты после рейт-матчинга (длина = capacity_bits)
+        """
+        coded_len = len(coded_bits)
+        target_len = self.capacity_bits
+        
+        if coded_len == target_len:
+            return coded_bits
+        
+        elif coded_len < target_len:
+            # Повторение (repetition)
+            repeats = target_len // coded_len
+            remainder = target_len % coded_len
+            matched = np.tile(coded_bits, repeats)
+            if remainder > 0:
+                matched = np.concatenate([matched, coded_bits[:remainder]])
+            return matched
+        
+        else:
+            # Выкалывание (puncturing)
+            # Удаляем каждый второй бит начиная со случайной позиции для равномерности
+            puncturing_ratio = coded_len / target_len
+            keep_indices = np.round(np.linspace(0, coded_len-1, target_len)).astype(int)
+            return coded_bits[keep_indices]
+    
+    def rate_dematch(self, llr_seq, orig_len):
+        """
+        Обратное преобразование LLR после рейт-матчинга.
+        :param llr_seq: массив LLR длины capacity_bits
+        :param original_len: исходная длина кодированного блока (до рейт-матчинга)
+        :return: LLR после рейт-дематчинга (длина = original_len)
+        """
+        received_len = len(llr_seq)
+        original_len = orig_len
+        
+        if received_len == original_len:
+            return llr_seq
+        
+        elif received_len > original_len:
+            # Было повторение: объединяем LLR повторённых блоков
+            repeats = received_len // original_len
+            remainder = received_len % original_len
+            
+            # Инициализация
+            combined = np.zeros(original_len)
+            counts = np.zeros(original_len)
+            
+            for i in range(repeats):
+                start = i * original_len
+                end = start + original_len
+                combined += llr_seq[start:end]
+                counts += 1
+            
+            if remainder > 0:
+                combined[:remainder] += llr_seq[repeats*original_len:]
+                counts[:remainder] += 1
+            
+            return combined / counts
+        
+        else:
+            # Было выкалывание: вставляем нулевые LLR на место выколотых битов
+            # (нулевой LLR = неопределённость)
+            punctured = np.zeros(original_len)
+            keep_indices = np.round(np.linspace(0, original_len-1, received_len)).astype(int)
+            
+            for i, idx in enumerate(keep_indices):
+                punctured[idx] = llr_seq[i]
+            
+            return punctured
+
+
 # ------------------ Блочный перемежитель ------------------
 class Interleaver:
     """Блочный перемежитель со случайной перестановкой"""
@@ -439,10 +537,10 @@ class ViterbiDecoder:
 # ========================= 4. OFDM ПЕРЕДАТЧИК / ПРИЁМНИК =========================
 
 class OFDMTx:
-    """OFDM передатчик с опциональным кодированием"""
+    """OFDM передатчик с опциональным кодированием и рейт-матчингом"""
     
     def __init__(self, num_re, fft_size, cp_type='normal', mod_type='QPSK',
-                 use_coding=False, encoder=None, interleaver=None):
+                 use_coding=False, encoder=None, interleaver=None, rate_matcher=None):
         self.num_re = num_re
         self.fft_size = fft_size
         self.cp_len = get_cp_length(fft_size, cp_type)
@@ -454,11 +552,13 @@ class OFDMTx:
         self.use_coding = use_coding
         self.encoder = encoder
         self.interleaver = interleaver
+        self.rate_matcher = rate_matcher
         self.code_rate = 0.5 if (use_coding and encoder) else 1.0
         
         self.info_bits_per_symbol = self.bps * self.code_rate
         self._orig_len = None
         self._pad_len = None
+        self._code_len = None
 
     def transmit(self, info_bits):
         """
@@ -466,10 +566,16 @@ class OFDMTx:
         :param info_bits: массив бит до кодирования
         :return: временной сигнал (частотная область, без IFFT для ускорения)
         """
-        # Кодирование и перемежение
-        if self.use_coding and self.encoder and self.interleaver:
+        if self.use_coding and self.encoder and self.interleaver and self.rate_matcher:
+            # 1. Кодирование
             coded = self.encoder.encode(info_bits)
-            inter_bits, self._orig_len, self._pad_len = self.interleaver.interleave(coded)
+            self._code_len = len(coded)
+            
+            # 2. Рейт-матчинг (согласование длины с ресурсной ёмкостью)
+            rate_matched = self.rate_matcher.rate_match(coded)
+            
+            # 3. Перемежение
+            inter_bits, self._orig_len, self._pad_len = self.interleaver.interleave(rate_matched)
             bits_to_mod = inter_bits
         else:
             bits_to_mod = info_bits
@@ -479,16 +585,15 @@ class OFDMTx:
         # Модуляция
         symbols = modulate(bits_to_mod, self.mod_type)
         
-        # Размещение на поднесущих (с защитными интервалами по краям)
+        # Размещение на поднесущих
         freq = np.zeros(self.fft_size, dtype=complex)
-        freq[self.offset:self.offset+self.num_re] = symbols
+        if len(symbols) > self.num_re:
+            # Обрезаем, если символов больше (на всякий случай)
+            symbols = symbols[:self.num_re]
+        freq[self.offset:self.offset+len(symbols)] = symbols
         
-        # IFFT (закомментировано для ускорения симуляции - канал линейный в частотной области)
-        # time_signal = np.fft.ifft(freq, norm='ortho')
+        # IFFT (закомментировано для ускорения)
         time_signal = freq
-        
-        # Добавление циклического префикса (опционально)
-        # return np.concatenate([time_signal[-self.cp_len:], time_signal])
         return time_signal
 
 
@@ -496,7 +601,8 @@ class OFDMRx:
     """OFDM приёмник с опциональным декодированием"""
     
     def __init__(self, num_re, fft_size, cp_type='normal', mod_type='QPSK',
-                 use_coding=False, decoder=None, interleaver=None, demapper=None):
+                 use_coding=False, decoder=None, interleaver=None, demapper=None,
+                 rate_matcher=None):
         self.num_re = num_re
         self.fft_size = fft_size
         self.cp_len = get_cp_length(fft_size, cp_type)
@@ -509,43 +615,73 @@ class OFDMRx:
         self.decoder = decoder
         self.interleaver = interleaver
         self.demapper = demapper
+        self.rate_matcher = rate_matcher
         self.code_rate = 0.5 if (use_coding and decoder) else 1.0
+        
+        # Для хранения параметров деперемежения
+        self._orig_len = None
+        self._pad_len = None
 
-    def receive(self, rx_signal, H_freq, noise_variance, return_llr=False):
+    def receive(self, rx_signal, H_freq, noise_variance, return_llr=False, orig_len=None, pad_len=None, code_len=None):
         """
         Обрабатывает принятый сигнал.
         :param rx_signal: принятый сигнал (частотная область)
         :param H_freq: частотная характеристика канала
         :param noise_variance: дисперсия шума на компоненту (σ²)
         :param return_llr: если True, возвращает LLR вместо жёстких битов
+        :param orig_len: исходная длина для деперемежения
+        :param pad_len: длина дополнения для деперемежения
         :return: биты или LLR, и оценка канала
         """
+        # Сохраняем параметры для деперемежения
+        self._orig_len = orig_len
+        self._pad_len = pad_len
+        
         # Извлечение активных поднесущих
         Y_re = rx_signal[self.offset:self.offset + self.num_re]
         H_re = H_freq[self.offset:self.offset + self.num_re]
 
         # MMSE эквалайзер
-        alfa = 5  # коэффициент запаса для устойчивости
+        alfa = 5
         denominator = np.abs(H_re)**2 + noise_variance * alfa
         W = np.conj(H_re) / denominator
         X_hat = W * Y_re
 
+        if_hard = True
+
         if self.use_coding and self.demapper and return_llr:
             # Мягкая демодуляция → LLR
-            llr = self.demapper.demap(X_hat, noise_variance=noise_variance)
+            if if_hard:
+                llr_hard = demodulate(X_hat, self.mod_type)
+                K = 100
+                llr = (1 - 2 * llr_hard.astype(float)) * K
+            else:
+                llr = self.demapper.demap(X_hat, noise_variance=noise_variance)
+
             
             # Деперемежение LLR
             if self.interleaver and self._orig_len is not None:
-                # Вычисляем параметры для деперемежения
-                coded_len = len(llr)
-                # Для простоты: предполагаем, что блок = вся последовательность
                 deinter_llr = self.interleaver.deinterleave(
-                    llr, orig_len=coded_len, pad_len=0
+                    llr, orig_len=self._orig_len, pad_len=self._pad_len
                 )
-                return deinter_llr, H_re
-            return llr, H_re
+            else:
+                deinter_llr = llr
+            
+            # Рейт-дематчинг
+            if self.rate_matcher:
+                dematched = self.rate_matcher.rate_dematch(deinter_llr, orig_len=code_len)
+            else:
+                dematched = deinter_llr
+            
+            # Проверка длины перед декодированием
+            if len(dematched) % 2 != 0:
+                # Нечётная длина — обрезаем
+                dematched = dematched[:-1]
+                print(f"⚠️ Предупреждение: обрезан LLR до чётной длины {len(dematched)}")
+            
+            return dematched, H_re
         else:
-            # Жёсткая демодуляция (режим без кодирования)
+            # Жёсткая демодуляция
             bits = demodulate(X_hat, self.mod_type)
             return bits, H_re
 
@@ -572,15 +708,6 @@ class TDLChannel:
     """Канал с задержками (TDL) для моделирования 5G NTN"""
     
     def __init__(self, profile_name, fft_size, scs_khz, d_km, fc_ghz, shadowing_std_db, cp_len):
-        """
-        :param profile_name: 'A', 'B' или 'C'
-        :param fft_size: размер БПФ
-        :param scs_khz: шаг поднесущих в кГц
-        :param d_km: расстояние (высота орбиты) в км
-        :param fc_ghz: несущая частота в ГГц
-        :param shadowing_std_db: стандартное отклонение теневых потерь (дБ)
-        :param cp_len: длина циклического префикса
-        """
         self.fft_size = fft_size
         self.scs_hz = scs_khz * 1e3
         self.fs = fft_size * self.scs_hz
@@ -642,7 +769,7 @@ class TDLChannel:
         h_full = np.zeros(self.fft_size, dtype=complex)
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
-        
+        H_freq = np.ones(self.fft_size, dtype=complex)
         # Применение канала (умножение в частотной области)
         X_freq = tx_signal
         Y_freq = X_freq * H_freq
@@ -653,7 +780,8 @@ class TDLChannel:
         noise = np.sqrt(N0/2) * (np.random.randn(*Y_freq.shape) + 1j*np.random.randn(*Y_freq.shape))
         p_noise = np.mean(np.abs(noise)**2)
         
-        rx_signal = Y_freq + noise
+        rx_signal = Y_freq #+ noise
+        N0 = 0
         return rx_signal, H_freq, N0, time_shift
 
 
@@ -710,43 +838,46 @@ def simulate_snr(snr_db, tx, rx, tdl_channel, num_trials):
     return ber, bler, throughput
 
 
-def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len=500):
-    """Симуляция для одного SNR (с кодированием)"""
+def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len):
+    """Симуляция для одного SNR (с кодированием и рейт-матчингом)"""
     snr_lin = 10**(snr_db/10.0)
     total_bit_errors = 0
     block_errors = 0
     total_info_bits = 0
     
-    # Расчёт параметров для демодулятора
     code_rate = tx.code_rate
     es_n0 = snr_lin * code_rate
-    noise_var = 1.0 / (2.0 * es_n0)  # дисперсия на компоненту
+    noise_var = 1.0 / (2.0 * es_n0)
 
-    for _ in range(num_trials):
+    for trial in range(num_trials):
         # Генерация информационных битов
         info_bits = np.random.randint(0, 2, frame_len)
         
         # Передача
         tx_signal = tx.transmit(info_bits)
-        rx_signal, H_freq, _, time_shift = tdl_channel.apply(tx_signal, snr_lin)
+        rx_signal, H_freq, N0, time_shift = tdl_channel.apply(tx_signal, snr_lin)
         
         # Приём с мягкими решениями
-        llr, H_re = rx.receive(rx_signal, H_freq, noise_var, return_llr=True)
+        # Передаём orig_len и pad_len от передатчика
+        llr, H_re = rx.receive(
+            rx_signal, H_freq, N0, return_llr=True,
+            orig_len=tx._orig_len, pad_len=tx._pad_len, code_len=tx._code_len
+        )
         
         # Декодирование Витерби
         decoded = rx.decoder.decode(llr, block_len=frame_len)
         
-        # Подсчёт ошибок
-        errors = np.sum(info_bits != decoded)
+        # Выравнивание длин (на случай обрезки)
+        min_len = min(len(info_bits), len(decoded))
+        errors = np.sum(info_bits[:min_len] != decoded[:min_len])
         total_bit_errors += errors
-        total_info_bits += frame_len
+        total_info_bits += min_len
         if errors > 0:
             block_errors += 1
 
     ber = total_bit_errors / total_info_bits if total_info_bits else 1.0
     bler = block_errors / num_trials
     
-    # Спектральная эффективность с учётом кода
     spectral_eff_max = (tx.bps * tx.num_re * code_rate) / (tx.fft_size + tx.cp_len)
     throughput = (1 - ber) * spectral_eff_max
     
@@ -757,24 +888,20 @@ def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len=
 
 def main():
     # === Параметры системы ===
-    BAND = 'L_S'               # 'L_S' или 'Ka'
-    BW_MHZ = 10                # полоса, МГц
-    SCS_KHZ = 30               # шаг поднесущих, кГц
-    MODULATION = 'BPSK'        # 'BPSK', 'QPSK', '16QAM', '64QAM', '256QAM'
+    BAND = 'L_S'
+    BW_MHZ = 10
+    SCS_KHZ = 30
+    MODULATION = 'BPSK'
 
-    # Параметры орбиты и канала
-    ORBIT_HEIGHT_KM = 600      # высота в км
-    CARRIER_FREQ_GHZ = 2.0     # несущая частота (ГГц)
-    SHADOWING_STD_DB = 3.0     # shadowing σ (дБ)
-    TDL_PROFILE = 'C'          # 'A', 'B', 'C'
+    ORBIT_HEIGHT_KM = 600
+    CARRIER_FREQ_GHZ = 2.0
+    SHADOWING_STD_DB = 3.0
+    TDL_PROFILE = 'C'
 
-    # Параметры симуляции
-    SNR_DB_LIST = np.arange(0, 11, 1)   # диапазон SNR для кодированного режима
-    NUM_TRIALS = 200                    # число испытаний на точку
-    FRAME_LEN = 500                     # длина информационного блока (бит)
+    SNR_DB_LIST = np.arange(0, 11, 1)
+    NUM_TRIALS = 200
     
-    # === Переключатель кодирования ===
-    USE_CODING = True  # Установите False для режима без кодирования
+    USE_CODING = True
     
     # === Расчёт конфигурации ===
     rb = get_rb(BAND, BW_MHZ, SCS_KHZ)
@@ -785,30 +912,60 @@ def main():
     num_re = rb * 12
     fft_size = get_fft_size_from_re(num_re)
     cp_type = 'normal'
+    cp_len = get_cp_length(fft_size, cp_type)
     
-    # === Инициализация компонентов кодирования ===
+    # Ёмкость OFDM символа в битах
+    capacity_bits = num_re * bits_per_symbol(MODULATION)
+    
     if USE_CODING:
+        # Рейт-матчер: согласует кодовый блок с ёмкостью
+        rate_matcher = RateMatcher(
+            modulation=MODULATION,
+            num_symbols=num_re,
+            code_rate=0.5
+        )
+        
+        # Информационная ёмкость (максимальный размер блока)
+        # Учитываем tail-биты сверточного кода (6 байт хвоста)
+        tail_overhead = 12  # memory * 2 (т.к. rate=1/2)
+        max_info_bits = rate_matcher.get_info_block_size() - tail_overhead
+        
+        # Выбираем безопасный размер блока
+        FRAME_LEN = max(64, min(max_info_bits, 500))
+        
+        print(f"📐 Рейт-матчинг: OFDM-ёмкость={capacity_bits} бит")
+        print(f"   Информационных бит после кода rate=1/2: {rate_matcher.get_info_block_size()}")
+        print(f"   С учётом tail-битов ({tail_overhead}): FRAME_LEN={FRAME_LEN} бит")
+        
+        # === Инициализация компонентов кодирования ===
         print("🔧 Инициализация компонентов кодирования...")
         encoder = ConvEncoder(poly1=0o133, poly2=0o171, memory=6)
         decoder = ViterbiDecoder(poly1=0o133, poly2=0o171, memory=6)
-        
-        # Размер блока перемежителя = длина кодированного кадра
-        test_coded = encoder.encode(np.zeros(FRAME_LEN))
-        interleaver = Interleaver(block_size=len(test_coded), seed=42)
         demapper = SoftDemapper(modulation=MODULATION)
+        
+        # Размер блока перемежителя = длине после рейт-матчинга
+        test_bits = np.zeros(FRAME_LEN, dtype=int)
+        test_coded = encoder.encode(test_bits)
+        test_rate_matched = rate_matcher.rate_match(test_coded)
+        interleaver = Interleaver(block_size=len(test_rate_matched), seed=42)
+        
         print(f"   ✓ Код: свёрточный (2,1,7), rate=1/2")
-        print(f"   ✓ Блок перемежителя: {len(test_coded)} бит")
+        print(f"   ✓ Кодированный блок: {len(test_coded)} бит")
+        print(f"   ✓ После рейт-матчинга: {len(test_rate_matched)} бит")
+        print(f"   ✓ Блок перемежителя: {interleaver.block_size} бит")
     else:
-        encoder = decoder = interleaver = demapper = None
-        # Для режима без кодирования можно расширить диапазон SNR
+        encoder = decoder = interleaver = demapper = rate_matcher = None
+        FRAME_LEN = capacity_bits
         SNR_DB_LIST = np.arange(0, 21, 2)
     
     # === Создание Tx/Rx ===
     tx = OFDMTx(num_re, fft_size, cp_type, MODULATION,
-                use_coding=USE_CODING, encoder=encoder, interleaver=interleaver)
+                use_coding=USE_CODING, encoder=encoder, 
+                interleaver=interleaver, rate_matcher=rate_matcher)
     rx = OFDMRx(num_re, fft_size, cp_type, MODULATION,
                 use_coding=USE_CODING, decoder=decoder, 
-                interleaver=interleaver, demapper=demapper)
+                interleaver=interleaver, demapper=demapper,
+                rate_matcher=rate_matcher)
     
     # === Создание канала ===
     tdl = TDLChannel(TDL_PROFILE, fft_size, SCS_KHZ,
@@ -819,6 +976,7 @@ def main():
     print("📡 КОНФИГУРАЦИЯ СИМУЛЯЦИИ 5G NTN")
     print("="*60)
     print(f"{'Кодирование:':<25} {'✅ Включено' if USE_CODING else '❌ Выключено'}")
+    print(f"{'Рейт-матчинг:':<25} {'✅' if USE_CODING else '❌'}")
     print(f"{'Диапазон:':<25} {BAND}")
     print(f"{'Полоса:':<25} {BW_MHZ} МГц")
     print(f"{'SCS:':<25} {SCS_KHZ} кГц")
@@ -827,16 +985,15 @@ def main():
     print(f"{'FFT size:':<25} {fft_size}")
     print(f"{'CP length:':<25} {tx.cp_len} отсчётов")
     print(f"{'Модуляция:':<25} {MODULATION} ({tx.bps} бит/символ)")
+    print(f"{'Ёмкость OFDM:':<25} {capacity_bits} бит")
     if USE_CODING:
-        print(f"{'Инфо. бит/символ:':<25} {tx.info_bits_per_symbol:.2f}")
+        print(f"{'Инфо. бит/блок:':<25} {FRAME_LEN}")
     print(f"{'Орбита:':<25} {ORBIT_HEIGHT_KM} км")
     print(f"{'Несущая частота:':<25} {CARRIER_FREQ_GHZ} ГГц")
     print(f"{'Shadowing σ:':<25} {SHADOWING_STD_DB} дБ")
     print(f"{'Профиль TDL:':<25} {TDL_PROFILE}")
     print(f"{'SNR диапазон:':<25} {SNR_DB_LIST[0]}..{SNR_DB_LIST[-1]} дБ")
     print(f"{'Испытаний на точку:':<25} {NUM_TRIALS}")
-    if USE_CODING:
-        print(f"{'Длина блока:':<25} {FRAME_LEN} бит")
     print("="*60 + "\n")
 
     # === Запуск симуляции ===
@@ -853,19 +1010,17 @@ def main():
         results[snr] = {'ber': ber, 'bler': bler, 'throughput': thr}
         print(f"BER={ber:.2e}, BLER={bler:.3f}")
 
-    # === Теоретические кривые (для сравнения) ===
+    # === Теоретические кривые ===
     snr_lin_vals = 10**(np.array(SNR_DB_LIST)/10)
     
     if USE_CODING:
-        # Для кодированного режима: теоретическая кривая с учётом code rate
-        bits_per_block = FRAME_LEN
-        bler_theory = bler_theoretical(bits_per_block, snr_lin_vals * code_rate, MODULATION)
+        # Для кодированного режима
+        bler_theory = bler_theoretical(FRAME_LEN, snr_lin_vals * 0.5, MODULATION)
     else:
-        bits_per_block = num_re * tx.bps
-        bler_theory = bler_theoretical(bits_per_block, snr_lin_vals, MODULATION)
+        bler_theory = bler_theoretical(capacity_bits, snr_lin_vals, MODULATION)
     
     shannon = shannon_capacity(snr_lin_vals)
-    max_se = (tx.bps * num_re * tx.code_rate) / (fft_size + tx.cp_len)
+    max_se = (tx.bps * num_re * tx.code_rate) / (fft_size + cp_len)
 
     # === Построение графиков ===
     plt.style.use('seaborn-v0_8-darkgrid')
@@ -881,12 +1036,12 @@ def main():
     plt.ylabel('BLER', fontsize=11)
     title = f'BLER: {MODULATION}, TDL-{TDL_PROFILE}, {ORBIT_HEIGHT_KM} км'
     if USE_CODING:
-        title += ', Код (2,1,7) rate=1/2'
+        title += ', Код (2,1,7) rate=1/2 + Rate Matching'
     plt.title(title, fontsize=12, fontweight='bold')
     plt.grid(True, which='both', linestyle='--', alpha=0.7)
     plt.legend(fontsize=10)
     plt.tight_layout()
-    bler_fig = plt.gcf()
+    plt.show()
 
     # График 2: Throughput vs SNR
     plt.figure(figsize=(9, 6))
@@ -902,7 +1057,7 @@ def main():
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend(fontsize=10)
     plt.tight_layout()
-    thr_fig = plt.gcf()
+    plt.show()
 
     # === Сохранение результатов ===
     date_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -910,10 +1065,6 @@ def main():
     save_dir = f"NTN_{MODULATION}_{coding_tag}_{TDL_PROFILE}_H{ORBIT_HEIGHT_KM}km_{date_str}"
     os.makedirs(save_dir, exist_ok=True)
     
-    bler_fig.savefig(os.path.join(save_dir, "BLER_vs_SNR.png"), dpi=150, bbox_inches='tight')
-    thr_fig.savefig(os.path.join(save_dir, "Throughput_vs_SNR.png"), dpi=150, bbox_inches='tight')
-    plt.close('all')
-
     # Сохранение данных в .mat
     mat_data = {
         'config': {
@@ -926,18 +1077,17 @@ def main():
             'frame_len': FRAME_LEN if USE_CODING else None
         },
         'snr_db': np.array(SNR_DB_LIST),
-        'bler_sim': np.array([results[s]['bler'] for s in SNR_DB_LIST]),
+        'bler_sim': np.array(bler_sim),
         'bler_theory_awgn': bler_theory,
-        'throughput_sim': np.array([results[s]['throughput'] for s in SNR_DB_LIST]),
+        'throughput_sim': np.array(thr_sim),
         'shannon_capacity': shannon,
         'ber_sim': np.array([results[s]['ber'] for s in SNR_DB_LIST])
     }
+    
     savemat(os.path.join(save_dir, 'simulation_data.mat'), mat_data)
 
     # === Итоговый вывод ===
     print(f"\n✅ Результаты сохранены в папку: {save_dir}/")
-    print("   📄 BLER_vs_SNR.png")
-    print("   📄 Throughput_vs_SNR.png") 
     print("   📄 simulation_data.mat")
     
     # Краткая статистика
