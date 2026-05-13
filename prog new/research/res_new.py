@@ -97,7 +97,7 @@ def modulate(bits, mod_type):
     bits = np.asarray(bits)
     
     if mod_type == 'BPSK':
-        return 2*bits - 1
+        return 1 - 2 * bits
     
     elif mod_type == 'QPSK':
         even, odd = bits[0::2], bits[1::2]
@@ -649,6 +649,8 @@ class OFDMRx:
 
         if_hard = False
 
+        eff_noise_var = noise_variance * np.mean(np.abs(W)**2)
+
         if self.use_coding and self.demapper and return_llr:
             # Мягкая демодуляция → LLR
             if if_hard:
@@ -656,7 +658,7 @@ class OFDMRx:
                 K = 100
                 llr = (1 - 2 * llr_hard.astype(float)) * K
             else:
-                llr = self.demapper.demap(X_hat, noise_variance=noise_variance)
+                llr = self.demapper.demap(X_hat, noise_variance=eff_noise_var)
 
             
             # Деперемежение LLR
@@ -855,26 +857,24 @@ def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len)
         
         # Передача
         tx_signal = tx.transmit(info_bits)
-        rx_signal, H_freq, N0, time_shift = tdl_channel.apply(tx_signal, snr_lin)
+        rx_signal, H_freq, _, time_shift = tdl_channel.apply(tx_signal, es_n0)
         
         # Приём с мягкими решениями
         # Передаём orig_len и pad_len от передатчика
         llr, H_re = rx.receive(
-            rx_signal, H_freq, N0, return_llr=True,
+            rx_signal, H_freq, noise_var, return_llr=True,
             orig_len=tx._orig_len, pad_len=tx._pad_len, code_len=tx._code_len
         )
         
         # Декодирование Витерби
         decoded = rx.decoder.decode(llr, block_len=frame_len)
-        
         # Выравнивание длин (на случай обрезки)
         min_len = min(len(info_bits), len(decoded))
-        print("info: ", info_bits[0:100]);
-        print("decoded: ", decoded[0:100])
         errors = np.sum(info_bits[:min_len] != decoded[:min_len])
         total_bit_errors += errors
         total_info_bits += min_len
         if errors > 0:
+            # print("errors: ", errors)
             block_errors += 1
 
     ber = total_bit_errors / total_info_bits if total_info_bits else 1.0
@@ -900,7 +900,7 @@ def main():
     SHADOWING_STD_DB = 3.0
     TDL_PROFILE = 'C'
 
-    SNR_DB_LIST = np.arange(0, 11, 1)
+    SNR_DB_LIST = np.arange(-5, 2, 1)
     NUM_TRIALS = 200
     
     USE_CODING = True
