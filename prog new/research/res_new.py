@@ -647,7 +647,7 @@ class OFDMRx:
         W = np.conj(H_re) / denominator
         X_hat = W * Y_re
 
-        if_hard = True
+        if_hard = False
 
         if self.use_coding and self.demapper and return_llr:
             # Мягкая демодуляция → LLR
@@ -780,8 +780,8 @@ class TDLChannel:
         noise = np.sqrt(N0/2) * (np.random.randn(*Y_freq.shape) + 1j*np.random.randn(*Y_freq.shape))
         p_noise = np.mean(np.abs(noise)**2)
         
-        rx_signal = Y_freq #+ noise
-        N0 = 0
+        rx_signal = Y_freq + noise
+
         return rx_signal, H_freq, N0, time_shift
 
 
@@ -869,6 +869,8 @@ def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len)
         
         # Выравнивание длин (на случай обрезки)
         min_len = min(len(info_bits), len(decoded))
+        print("info: ", info_bits[0:100]);
+        print("decoded: ", decoded[0:100])
         errors = np.sum(info_bits[:min_len] != decoded[:min_len])
         total_bit_errors += errors
         total_info_bits += min_len
