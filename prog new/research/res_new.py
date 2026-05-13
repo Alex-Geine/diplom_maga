@@ -771,7 +771,7 @@ class TDLChannel:
         h_full = np.zeros(self.fft_size, dtype=complex)
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
-        H_freq = np.ones(self.fft_size, dtype=complex)
+        # H_freq = np.ones(self.fft_size, dtype=complex)
         # Применение канала (умножение в частотной области)
         X_freq = tx_signal
         Y_freq = X_freq * H_freq
@@ -900,8 +900,8 @@ def main():
     SHADOWING_STD_DB = 3.0
     TDL_PROFILE = 'C'
 
-    SNR_DB_LIST = np.arange(-5, 2, 1)
-    NUM_TRIALS = 200
+    SNR_DB_LIST = np.arange(-5, 10, 1)
+    NUM_TRIALS = 1000
     
     USE_CODING = True
     
