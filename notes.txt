@@ -137,3 +137,7 @@ Throughput vs. SNR/SINR
 - Spread:         BLER vs SNR vs velo, BLER vs SNR vs numRb
 - Shift:          BLER vs SNR vs freq_shift, BLER vs SNR vs param set from theory
 - Spread + Shift: ?
+
+NOTE: 
+- в прошлый раз ты неправильно проводил симуляцию доплеровского сдвига на каждую поднесущую
+- в твоем случае нужно было делать именно передискретизацию данных, что эквивалентно масштабированию спектра.

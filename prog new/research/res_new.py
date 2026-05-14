@@ -18,9 +18,9 @@ import datetime
 import sys
 
 # Calculate Doppler multyplier per each subc
-def preCalcDoppler(fft_size, subc_freq, doppler_factor):
-    time_indices = np.arange(fft_size)
-    doppler_phase = 2 * np.pi * subc_freq * doppler_factor * time_indices
+def preCalcDoppler(fft_size, subc_freq, fd):
+    n = np.arange(fft_size)
+    doppler_phase = 2 * np.pi * fd * n / fft_size / subc_freq
     doppler_signal = np.exp(1j * doppler_phase)
 
     return doppler_signal
@@ -644,9 +644,11 @@ class OFDMRx:
         # Сохраняем параметры для деперемежения
         self._orig_len = orig_len
         self._pad_len = pad_len
-        
+
+        Y_freq = np.fft.fft(rx_signal, norm='ortho')
+
         # Извлечение активных поднесущих
-        Y_re = rx_signal[self.offset:self.offset + self.num_re]
+        Y_re = Y_freq[self.offset:self.offset + self.num_re]
         H_re = H_freq[self.offset:self.offset + self.num_re]
 
         # MMSE эквалайзер
@@ -785,15 +787,20 @@ class TDLChannel:
         # H_freq = np.ones(self.fft_size, dtype=complex)
         # Применение канала (умножение в частотной области)
         X_freq = tx_signal
-        Y_freq = X_freq * H_freq * self.dopp_exp
+        Y_freq = X_freq * H_freq
+
+        Y_time = np.fft.ifft(Y_freq, norm='ortho')
+
+        # add doppler shift
+        Y_time = Y_time * self.dopp_exp
 
         # Добавление шума
-        P_signal = np.mean(np.abs(Y_freq)**2)
+        P_signal = np.mean(np.abs(Y_time)**2)
         N0 = P_signal / snr_lin
-        noise = np.sqrt(N0/2) * (np.random.randn(*Y_freq.shape) + 1j*np.random.randn(*Y_freq.shape))
+        noise = np.sqrt(N0/2) * (np.random.randn(*Y_time.shape) + 1j*np.random.randn(*Y_time.shape))
         p_noise = np.mean(np.abs(noise)**2)
         
-        rx_signal = Y_freq + noise
+        rx_signal = Y_time + noise
 
         return rx_signal, H_freq, N0, time_shift
 
@@ -901,7 +908,7 @@ def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len)
 
 def main():
     c = 3e8 # speed of light
-    V = 7000   # relative radial speed between Tx and Rx
+    V = 4000   # relative radial speed between Tx and Rx
 
     # === Параметры системы ===
     BAND = 'L_S'
@@ -914,7 +921,7 @@ def main():
     SHADOWING_STD_DB = 3.0
     TDL_PROFILE = 'C'
 
-    SNR_DB_LIST = np.arange(0, 15, 1)
+    SNR_DB_LIST = np.arange(-5, 10, 1)
     NUM_TRIALS = 100
     
     USE_CODING = True
@@ -931,9 +938,11 @@ def main():
     cp_len = get_cp_length(fft_size, cp_type)
 
     doppler_factor = V / c
+    fo = 8e5 #(CARRIER_FREQ_GHZ * 1e9 - fft_size*SCS_KHZ)
+    fd =  fo * doppler_factor
 
-    # Calculate Doppler multyplier per each subc
-    dopp_exp = preCalcDoppler(fft_size, SCS_KHZ, doppler_factor);
+    # Calculate Doppler shift by fc
+    dopp_exp = preCalcDoppler(fft_size, SCS_KHZ, fd)
 
     # Ёмкость OFDM символа в битах
     capacity_bits = num_re * bits_per_symbol(MODULATION)
