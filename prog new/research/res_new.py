@@ -17,6 +17,14 @@ import os
 import datetime
 import sys
 
+# Calculate Doppler multyplier per each subc
+def preCalcDoppler(fft_size, subc_freq, doppler_factor):
+    time_indices = np.arange(fft_size)
+    doppler_phase = 2 * np.pi * subc_freq * doppler_factor * time_indices
+    doppler_signal = np.exp(1j * doppler_phase)
+
+    return doppler_signal
+
 # ========================= УТИЛИТЫ ВИЗУАЛИЗАЦИИ =========================
 
 def plot_channel(data, title="ИЧХ канала"):
@@ -709,7 +717,7 @@ TDL_PROFILES = {
 class TDLChannel:
     """Канал с задержками (TDL) для моделирования 5G NTN"""
     
-    def __init__(self, profile_name, fft_size, scs_khz, d_km, fc_ghz, shadowing_std_db, cp_len):
+    def __init__(self, profile_name, fft_size, scs_khz, d_km, fc_ghz, shadowing_std_db, cp_len, dopp_exp):
         self.fft_size = fft_size
         self.scs_hz = scs_khz * 1e3
         self.fs = fft_size * self.scs_hz
@@ -731,6 +739,9 @@ class TDLChannel:
         self.path_gains_lin = 10 ** (np.array(powers_db) / 10.0)
         self.max_delay = np.max(self.delays_samples)
         self.ir_len = self.max_delay + 1
+
+        # doppler exponents
+        self.dopp_exp = dopp_exp
 
     def get_path_loss_factor(self):
         """Возвращает коэффициент ослабления с учётом shadowing"""
@@ -774,8 +785,8 @@ class TDLChannel:
         # H_freq = np.ones(self.fft_size, dtype=complex)
         # Применение канала (умножение в частотной области)
         X_freq = tx_signal
-        Y_freq = X_freq * H_freq
-        
+        Y_freq = X_freq * H_freq * self.dopp_exp
+
         # Добавление шума
         P_signal = np.mean(np.abs(Y_freq)**2)
         N0 = P_signal / snr_lin
@@ -889,6 +900,9 @@ def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len)
 # ========================= 8. ОСНОВНОЙ СКРИПТ =========================
 
 def main():
+    c = 3e8 # speed of light
+    V = 7000   # relative radial speed between Tx and Rx
+
     # === Параметры системы ===
     BAND = 'L_S'
     BW_MHZ = 10
@@ -900,8 +914,8 @@ def main():
     SHADOWING_STD_DB = 3.0
     TDL_PROFILE = 'C'
 
-    SNR_DB_LIST = np.arange(-5, 10, 1)
-    NUM_TRIALS = 1000
+    SNR_DB_LIST = np.arange(0, 15, 1)
+    NUM_TRIALS = 100
     
     USE_CODING = True
     
@@ -915,7 +929,12 @@ def main():
     fft_size = get_fft_size_from_re(num_re)
     cp_type = 'normal'
     cp_len = get_cp_length(fft_size, cp_type)
-    
+
+    doppler_factor = V / c
+
+    # Calculate Doppler multyplier per each subc
+    dopp_exp = preCalcDoppler(fft_size, SCS_KHZ, doppler_factor);
+
     # Ёмкость OFDM символа в битах
     capacity_bits = num_re * bits_per_symbol(MODULATION)
     
@@ -971,7 +990,7 @@ def main():
     
     # === Создание канала ===
     tdl = TDLChannel(TDL_PROFILE, fft_size, SCS_KHZ,
-                     ORBIT_HEIGHT_KM, CARRIER_FREQ_GHZ, SHADOWING_STD_DB, tx.cp_len)
+                     ORBIT_HEIGHT_KM, CARRIER_FREQ_GHZ, SHADOWING_STD_DB, tx.cp_len, dopp_exp)
 
     # === Вывод конфигурации ===
     print("\n" + "="*60)
@@ -1046,20 +1065,20 @@ def main():
     plt.show()
 
     # График 2: Throughput vs SNR
-    plt.figure(figsize=(9, 6))
-    thr_sim = [results[s]['throughput'] for s in SNR_DB_LIST]
-    plt.plot(SNR_DB_LIST, thr_sim, 'bo-', linewidth=2, markersize=6, 
-             label=f'{MODULATION} (TDL+MMSE)' + ('+Код' if USE_CODING else ''))
-    plt.plot(SNR_DB_LIST, shannon, 'r--', linewidth=1.5, label='Ёмкость Шеннона')
-    plt.axhline(y=max_se, color='gray', linestyle=':', linewidth=1.5, 
-                label=f'Макс. SE = {max_se:.3f} бит/с/Гц')
-    plt.xlabel('SNR, дБ', fontsize=11)
-    plt.ylabel('Throughput, бит/с/Гц', fontsize=11)
-    plt.title(f'Спектральная эффективность, {BAND} диапазон', fontsize=12, fontweight='bold')
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(fontsize=10)
-    plt.tight_layout()
-    plt.show()
+    # plt.figure(figsize=(9, 6))
+    # thr_sim = [results[s]['throughput'] for s in SNR_DB_LIST]
+    # plt.plot(SNR_DB_LIST, thr_sim, 'bo-', linewidth=2, markersize=6, 
+    #          label=f'{MODULATION} (TDL+MMSE)' + ('+Код' if USE_CODING else ''))
+    # plt.plot(SNR_DB_LIST, shannon, 'r--', linewidth=1.5, label='Ёмкость Шеннона')
+    # plt.axhline(y=max_se, color='gray', linestyle=':', linewidth=1.5, 
+    #             label=f'Макс. SE = {max_se:.3f} бит/с/Гц')
+    # plt.xlabel('SNR, дБ', fontsize=11)
+    # plt.ylabel('Throughput, бит/с/Гц', fontsize=11)
+    # plt.title(f'Спектральная эффективность, {BAND} диапазон', fontsize=12, fontweight='bold')
+    # plt.grid(True, linestyle='--', alpha=0.7)
+    # plt.legend(fontsize=10)
+    # plt.tight_layout()
+    # plt.show()
 
     # === Сохранение результатов ===
     date_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
