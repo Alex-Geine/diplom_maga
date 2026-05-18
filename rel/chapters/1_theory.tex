@@ -663,7 +663,7 @@ $P_S \approx N(0, \gamma^2_S)$ относится к ослаблению сиг
 \begin{equation}
     \label{eq:rx_signal_complete_fd}
     \begin{split}
-    Y[k] &= \frac{\sqrt{P}}{T} \sum_{q = 0}^{Q - 1} a_q X[n] \sum_{n = 0}^{N-1} X[n] \exp^{-j2 \Pi f[n]\tau_q} \\
+    Y[k] &= \frac{\sqrt{P}}{T} \sum_{q = 0}^{Q - 1} a_q \sum_{n = 0}^{N-1} X[n] \exp^{-j2 \Pi f[n]\tau_q} \\
          &\times \int_{0}^{T}  e^{j 2 \Pi [f[n] (1 + \varepsilon ) + f_{cShift} \varepsilon - f[k]] t} \,dt + W[k],
     \end{split}
 \end{equation}
@@ -678,7 +678,7 @@ $P_S \approx N(0, \gamma^2_S)$ относится к ослаблению сиг
     \label{eq:integral_1}
     \begin{split}
         I[n, k] &= \frac{1}{T} \int_{0}^{T}  e^{j 2 \Pi \Delta f [n (1 + \varepsilon ) + \alpha_{D} - k] t}dt \\
-                &= e(j \Pi [(1 + \varepsilon )n + \alpha_{D} - k]) sinc(\Pi [ (1 + \varepsilon) n + \alpha_{D} - k]),
+                &= e^{j \Pi [(1 + \varepsilon )n + \alpha_{D} - k]} sinc(\Pi [ (1 + \varepsilon) n + \alpha_{D} - k]),
     \end{split}
 \end{equation}
 %------------------------------------------------------------------------------------
@@ -691,7 +691,7 @@ $P_S \approx N(0, \gamma^2_S)$ относится к ослаблению сиг
 % Equation
 %------------------------------------------------------------------------------------
 \begin{equation}
-    Y[k] = \sqrt{P} \sum_{q = 0}^{Q - 1} a_q X[n] \sum_{n = 0}^{N-1} X[n] e^{-j2 \Pi f[n]\tau_q} I[n, k] + W[k],
+    Y[k] = \sqrt{P} \sum_{q = 0}^{Q - 1} a_q \sum_{n = 0}^{N-1} X[n] e^{-j2 \Pi f[n]\tau_q} I[n, k] + W[k],
     \label{eq:rx_signal}
 \end{equation}
 %------------------------------------------------------------------------------------

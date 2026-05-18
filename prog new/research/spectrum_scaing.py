@@ -45,18 +45,18 @@ def scale_spectrum_ofdm(X_fd, a):
     return X_scaled
 
 # --- Симуляция OFDM QPSK сигнала ---
-N =1048  # Количество поднесущих
+N =2048  # Количество поднесущих
 np.random.seed(42)
 
 # Генерация случайных символов QPSK (созвездие: (+-1 +- j)/sqrt(2))
-qpsk_constellation = np.array([1+1j, 1-1j, -1+1j, -1-1j]) / np.sqrt(2)
+ qpsk_constellation = np.array([1+1j, 1-1j, -1+1j, -1-1j]) / np.sqrt(2)
 symbols = np.random.choice(qpsk_constellation, N)
 
 # В OFDM спектр формируется непосредственно в частотной области
 X_initial = symbols.copy()
 
 # Масштабирование спектра (например, сжатие в 1.5 раза)
-a = 100
+a = 1 - 3e-5
 X_scaled = scale_spectrum_ofdm(X_initial, a)
 
 # --- Визуализация спектров ---

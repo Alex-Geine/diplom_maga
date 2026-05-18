@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Симуляция системы связи 5G NTN с поддержкой помехоустойчивого кодирования
-(свёрточный код + перемежитель + декодер Витерби + рейт-матчинг)
-
-Автор: [Ваше имя]
-Дата: 2026
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.special import erfc
@@ -17,13 +7,21 @@ import os
 import datetime
 import sys
 
-# Calculate Doppler multyplier per each subc
-def preCalcDoppler(fft_size, subc_freq, fd):
-    n = np.arange(fft_size)
-    doppler_phase = 2 * np.pi * fd * n / fft_size / subc_freq
-    doppler_signal = np.exp(1j * doppler_phase)
-
-    return doppler_signal
+def compute_ici_matrix(N, epsilon, alpha_D):
+    """
+    Быстрое вычисление матрицы I размера N x N.
+    I[n,k] = exp(j*pi*z) * sinc(z), где z = (1+epsilon)*(n+1) + alpha_D - (k+1)
+    """
+    # Создаём индексы от 1 до N
+    n = np.arange(1, N+1).reshape(-1, 1)   # столбец (N, 1)
+    k = np.arange(1, N+1).reshape(1, -1)   # строка (1, N)
+    
+    # Вычисляем z для всей матрицы за один раз (broadcasting)
+    z = (1 + epsilon) * n + alpha_D - k    # размер (N, N)
+    
+    # Вычисляем экспоненту и sinc
+    I = np.exp(1j * np.pi * z) * np.sinc(z)
+    return I
 
 # ========================= УТИЛИТЫ ВИЗУАЛИЗАЦИИ =========================
 
@@ -645,10 +643,11 @@ class OFDMRx:
         self._orig_len = orig_len
         self._pad_len = pad_len
 
-        Y_freq = np.fft.fft(rx_signal, norm='ortho')
+        # Y_freq = np.fft.fft(rx_signal, norm='ortho')
 
         # Извлечение активных поднесущих
-        Y_re = Y_freq[self.offset:self.offset + self.num_re]
+        Y_re = rx_signal[self.offset:self.offset + self.num_re]
+        # Y_re = Y_freq[self.offset:self.offset + self.num_re]
         H_re = H_freq[self.offset:self.offset + self.num_re]
 
         # MMSE эквалайзер
@@ -719,7 +718,7 @@ TDL_PROFILES = {
 class TDLChannel:
     """Канал с задержками (TDL) для моделирования 5G NTN"""
     
-    def __init__(self, profile_name, fft_size, scs_khz, d_km, fc_ghz, shadowing_std_db, cp_len, dopp_exp):
+    def __init__(self, profile_name, fft_size, scs_khz, d_km, fc_ghz, shadowing_std_db, cp_len, I):
         self.fft_size = fft_size
         self.scs_hz = scs_khz * 1e3
         self.fs = fft_size * self.scs_hz
@@ -742,8 +741,8 @@ class TDLChannel:
         self.max_delay = np.max(self.delays_samples)
         self.ir_len = self.max_delay + 1
 
-        # doppler exponents
-        self.dopp_exp = dopp_exp
+        # ICI matrics
+        self.I = I
 
     def get_path_loss_factor(self):
         """Возвращает коэффициент ослабления с учётом shadowing"""
@@ -785,22 +784,26 @@ class TDLChannel:
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
         # H_freq = np.ones(self.fft_size, dtype=complex)
-        # Применение канала (умножение в частотной области)
+
         X_freq = tx_signal
-        Y_freq = X_freq * H_freq
 
-        Y_time = np.fft.ifft(Y_freq, norm='ortho')
 
-        # add doppler shift
-        Y_time = Y_time * self.dopp_exp
+        Y_freq = X_freq
+        # Матрица ICI
+        Y_freq = X_freq @ self.I
+
+        # Применение канала
+        Y_freq = Y_freq * H_freq
+
+        # Y_time = np.fft.ifft(Y_freq, norm='ortho')
 
         # Добавление шума
-        P_signal = np.mean(np.abs(Y_time)**2)
+        P_signal = np.mean(np.abs(Y_freq)**2)
         N0 = P_signal / snr_lin
-        noise = np.sqrt(N0/2) * (np.random.randn(*Y_time.shape) + 1j*np.random.randn(*Y_time.shape))
+        noise = np.sqrt(N0/2) * (np.random.randn(*Y_freq.shape) + 1j*np.random.randn(*Y_freq.shape))
         p_noise = np.mean(np.abs(noise)**2)
         
-        rx_signal = Y_time + noise
+        rx_signal = Y_freq + noise
 
         return rx_signal, H_freq, N0, time_shift
 
@@ -937,12 +940,12 @@ def main():
     cp_type = 'normal'
     cp_len = get_cp_length(fft_size, cp_type)
 
-    doppler_factor = V / c
-    fo = 8e5 #(CARRIER_FREQ_GHZ * 1e9 - fft_size*SCS_KHZ)
+    doppler_factor = 0# V / c
+    fo = 0#8e5 #(CARRIER_FREQ_GHZ * 1e9 - fft_size*SCS_KHZ)
     fd =  fo * doppler_factor
 
     # Calculate Doppler shift by fc
-    dopp_exp = preCalcDoppler(fft_size, SCS_KHZ, fd)
+    I = compute_ici_matrix(fft_size, doppler_factor, fd)
 
     # Ёмкость OFDM символа в битах
     capacity_bits = num_re * bits_per_symbol(MODULATION)
@@ -999,7 +1002,7 @@ def main():
     
     # === Создание канала ===
     tdl = TDLChannel(TDL_PROFILE, fft_size, SCS_KHZ,
-                     ORBIT_HEIGHT_KM, CARRIER_FREQ_GHZ, SHADOWING_STD_DB, tx.cp_len, dopp_exp)
+                     ORBIT_HEIGHT_KM, CARRIER_FREQ_GHZ, SHADOWING_STD_DB, tx.cp_len, I)
 
     # === Вывод конфигурации ===
     print("\n" + "="*60)
