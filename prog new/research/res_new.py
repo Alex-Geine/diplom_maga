@@ -911,7 +911,7 @@ def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len)
 
 def main():
     c = 3e8 # speed of light
-    V = 4000   # relative radial speed between Tx and Rx
+    V = 8000   # relative radial speed between Tx and Rx
 
     # === Параметры системы ===
     BAND = 'L_S'
@@ -935,8 +935,8 @@ def main():
         print(f"❌ Ошибка: Неверная комбинация {BAND}/{BW_MHZ}МГц/{SCS_KHZ}кГц")
         sys.exit(1)
     
-    num_re = rb * 12
-    fft_size = get_fft_size_from_re(num_re)
+    num_re = 4096#rb * 12
+    fft_size = 4096 #get_fft_size_from_re(num_re)
     cp_type = 'normal'
     cp_len = get_cp_length(fft_size, cp_type)
 
@@ -962,9 +962,11 @@ def main():
         # Учитываем tail-биты сверточного кода (6 байт хвоста)
         tail_overhead = 12  # memory * 2 (т.к. rate=1/2)
         max_info_bits = rate_matcher.get_info_block_size() - tail_overhead
-        
+
+        max_frame_len = (capacity_bits - 12) // 2
+
         # Выбираем безопасный размер блока
-        FRAME_LEN = max(64, min(max_info_bits, 500))
+        FRAME_LEN = max(64, min(max_info_bits, max_frame_len))
         
         print(f"📐 Рейт-матчинг: OFDM-ёмкость={capacity_bits} бит")
         print(f"   Информационных бит после кода rate=1/2: {rate_matcher.get_info_block_size()}")
