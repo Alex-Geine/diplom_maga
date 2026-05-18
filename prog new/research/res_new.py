@@ -650,11 +650,15 @@ class OFDMRx:
         # Y_re = Y_freq[self.offset:self.offset + self.num_re]
         H_re = H_freq[self.offset:self.offset + self.num_re]
 
+        
+
         # MMSE эквалайзер
         alfa = 5
         denominator = np.abs(H_re)**2 + noise_variance * alfa
         W = np.conj(H_re) / denominator
         X_hat = W * Y_re
+
+        plot_constellation(X_hat)
 
         if_hard = False
 
@@ -783,17 +787,17 @@ class TDLChannel:
         h_full = np.zeros(self.fft_size, dtype=complex)
         h_full[:len(h)] = h
         H_freq = np.fft.fft(h_full, norm='ortho')
-        # H_freq = np.ones(self.fft_size, dtype=complex)
+        H_freq = np.ones(self.fft_size, dtype=complex)
 
         X_freq = tx_signal
 
-
-        Y_freq = X_freq
         # Матрица ICI
-        Y_freq = X_freq @ self.I
+        Y_freq = X_freq * H_freq
+    
+        Y_freq = Y_freq @ self.I
 
         # Применение канала
-        Y_freq = Y_freq * H_freq
+
 
         # Y_time = np.fft.ifft(Y_freq, norm='ortho')
 
@@ -802,6 +806,8 @@ class TDLChannel:
         N0 = P_signal / snr_lin
         noise = np.sqrt(N0/2) * (np.random.randn(*Y_freq.shape) + 1j*np.random.randn(*Y_freq.shape))
         p_noise = np.mean(np.abs(noise)**2)
+
+        print("SNR: ", 10 * np.log10(P_signal/p_noise))
         
         rx_signal = Y_freq + noise
 
@@ -911,7 +917,7 @@ def simulate_snr_with_coding(snr_db, tx, rx, tdl_channel, num_trials, frame_len)
 
 def main():
     c = 3e8 # speed of light
-    V = 8000   # relative radial speed between Tx and Rx
+    V = 0 #8000   # relative radial speed between Tx and Rx
 
     # === Параметры системы ===
     BAND = 'L_S'
@@ -924,8 +930,8 @@ def main():
     SHADOWING_STD_DB = 3.0
     TDL_PROFILE = 'C'
 
-    SNR_DB_LIST = np.arange(-5, 10, 1)
-    NUM_TRIALS = 100
+    SNR_DB_LIST = np.arange(20, 21, 1)
+    NUM_TRIALS = 30
     
     USE_CODING = True
     
@@ -935,12 +941,12 @@ def main():
         print(f"❌ Ошибка: Неверная комбинация {BAND}/{BW_MHZ}МГц/{SCS_KHZ}кГц")
         sys.exit(1)
     
-    num_re = 4096#rb * 12
-    fft_size = 4096 #get_fft_size_from_re(num_re)
+    num_re = 2048#rb * 12
+    fft_size = 2048 #get_fft_size_from_re(num_re)
     cp_type = 'normal'
     cp_len = get_cp_length(fft_size, cp_type)
 
-    doppler_factor = 0# V / c
+    doppler_factor = V / c
     fo = 0#8e5 #(CARRIER_FREQ_GHZ * 1e9 - fft_size*SCS_KHZ)
     fd =  fo * doppler_factor
 
