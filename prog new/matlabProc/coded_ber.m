@@ -9,14 +9,10 @@ function sim_ber_vs_snr_coded()
     EbNo_vec = -10:2:18; 
     
     % Список типов модуляций для анализа
-    %
     modTypes = {'QPSK', '16QAM', '64QAM', '256QAM'};
-    % 
-    % Цвета для графиков
-    colors = {'b', 'r', 'g','m'};
     
-    % Глубина интерливера (число строк матрицы)
-    numRowsInterleaver = 40; 
+    % Цвета для графиков
+    colors = {'b', 'r', 'g', 'm'};
     
     % Массивы для хранения итоговых BER
     BER_coded_results = zeros(length(modTypes), length(EbNo_vec));
@@ -29,11 +25,12 @@ function sim_ber_vs_snr_coded()
         modType = modTypes{m};
         
         % Настройка количества бит в зависимости от модуляции
+        % В кодированной системе декодеру Витерби нужно достаточно символов для сходимости
         switch modType
             case 'QPSK',   bps = 2; N_info = 10000;  
-            case '16QAM',  bps = 4; N_info = 10000; % 
-            case '64QAM',  bps = 6; N_info = 10020; % 10020 * 2 = 20040 (делится на 40 и на 6)
-            case '256QAM', bps = 8; N_info = 10000;
+            case '16QAM',  bps = 4; N_info = 10000;
+            case '64QAM',  bps = 6; N_info = 12000;
+            case '256QAM', bps = 8; N_info = 12000;
         end
         
         fprintf('Симуляция для модуляции: %s...\n', modType);
@@ -45,50 +42,46 @@ function sim_ber_vs_snr_coded()
             % 2.1 Генерация данных и сверточное кодирование
             txInfoBits = randi([0 1], N_info, 1);
             txCodedBits = conv_encoder(txInfoBits);
-            lenCodedOriginal = length(txCodedBits); % Сохраняем исходную длину
             
-            % 2.2 Блочное перемежение бит (Интерливер)
-            txInterleavedBits = interleaver(txCodedBits, numRowsInterleaver);
-
-            % Перегруппировка ПЕРЕМЕШАННЫХ бит под формат маппера [Символы x биты]
-            numSymbols = length(txInterleavedBits) / bps;
-            txBitsMatrix = reshape(txInterleavedBits, numSymbols, bps);
+            % Перегруппировка под формат маппера [Символы x биты]
+            numSymbols = length(txCodedBits) / bps;
+            txBitsMatrix = reshape(txCodedBits, bps, numSymbols).';
             
-            % 2.3 Модуляция (Ваш внешний файл mapper.m)
+            % 2.2 Модуляция (Ваш внешний файл mapper.m)
             [txSig, constellation, bitMap] = mapper(txBitsMatrix, modType);
             
-            % 2.4 Добавление шума AWGN с учетом скорости кодирования (R)
+            % 2.3 Добавление шума AWGN с учетом скорости кодирования (R)
             EsNo_dB = EbNo_dB + 10*log10(bps) + 10*log10(R);
             EsNo = 10^(EsNo_dB/10);
             noiseVar = 1 / EsNo; 
             noise = sqrt(noiseVar/2) * (randn(size(txSig)) + 1i*randn(size(txSig)));
             rxSig = txSig + noise;
             
-            % 2.5 Мягкая демодуляция (Ваш внешний файл soft_demapper.m)
+            % 2.4 Мягкая демодуляция (Ваш внешний файл soft_demapper.m)
             llrMatrix = soft_demapper(rxSig, constellation, bitMap, noiseVar);
             
             % Вытягиваем LLR в один непрерывный битовый поток
-            llrBitsStream = llrMatrix(:);
+            llrBitsStream = llrMatrix.'; 
+            llrBitsStream = llrBitsStream(:);
             
-            % 2.6 Обратное перемежение LLR (Деинтерливер)
-            llrDeinterleaved = deinterleaver(llrBitsStream, numRowsInterleaver, lenCodedOriginal);
+            % 2.5 Декодирование Витерби
+            rxInfoBits = viterbi_soft_decoder(llrBitsStream, N_info);
             
-            % 2.7 Декодирование Витерби на основе восстановленных LLR
-            rxInfoBits = viterbi_soft_decoder(llrDeinterleaved, N_info);
-            
-            % 2.8 Расчет BER с кодированием (после Витерби)
+            % 2.6 Расчет BER с кодированием
             numErrorsCoded = sum(txInfoBits ~= rxInfoBits);
             BER_coded_results(m, s) = numErrorsCoded / N_info;
             
-            % 2.9 Расчет BER без кодирования (в канале, до Витерби)
-            hardCodedBits = (llrDeinterleaved < 0);
+            % 2.7 Расчет BER без кодирования (для сравнения)
+            hardCodedBits = (llrBitsStream < 0);
             numErrorsUncoded = sum(txCodedBits ~= hardCodedBits);
-            BER_uncoded_results(m, s) = numErrorsUncoded / lenCodedOriginal;            
+            BER_uncoded_results(m, s) = numErrorsUncoded / length(txCodedBits);
             
             % Если на выходе декодера Витерби ошибок больше нет (BER=0) на протяжении пары шагов,
             % мы зануляем остаток вектора для этой модуляции и переходим к следующей, чтобы сэкономить время.
             if numErrorsCoded == 0 && s > 4
                 BER_coded_results(m, s:end) = 0;
+                % Напрямую из канала ошибки еще могут идти, поэтому симулируем их отдельно, 
+                % либо просто даем циклу прерваться, так как нас интересует именно точка падения кодовой кривой.
                 break;
             end
         end
@@ -105,21 +98,21 @@ function sim_ber_vs_snr_coded()
         valid_idx_coded = BER_coded_results(m, :) > 0;
         valid_idx_uncoded = BER_uncoded_results(m, :) > 0;
         
-        % Сплошная линия с маркером — С кодированием и интерливером (Витерби)
+        % Сплошная линия с маркером — С кодированием (Витерби)
         p_coded = semilogy(EbNo_vec(valid_idx_coded), BER_coded_results(m, valid_idx_coded), ...
             [colors{m} '-'], 'LineWidth', 2, 'Marker', 'o', 'MarkerSize', 5);
         hold on;
         
         % Пунктирная линия — Без кодирования (из канала)
-        semilogy(EbNo_vec(valid_idx_uncoded), BER_uncoded_results(m, valid_idx_uncoded), ... 
+        semilogy(EbNo_vec(valid_idx_uncoded), BER_coded_results(m, valid_idx_uncoded), ... % Ссылаемся на те же точки по оси X
             [colors{m} '--'], 'LineWidth', 1.2);
         
-        % Сохраняем указатели для легенды (только для сплошных линий)
+        % Сохраняем указатели для легенды (только для сплошных линий, чтобы не перегружать)
         plots_for_legend = [plots_for_legend, p_coded]; %#ok<AGROW>
-        legend_labels = [legend_labels, {sprintf('%s (Coded Soft + Interleaved)', modTypes{m})}]; %#ok<AGROW>
+        legend_labels = [legend_labels, {sprintf('%s (Coded Soft)', modTypes{m})}]; %#ok<AGROW>
     end
     
-    % Добавляем две дополнительные линии чисто для пояснения стиля в легенде
+    % Добавляем две фейковые линии чисто для пояснения стиля в легенде
     dummy_solid = plot(NaN, NaN, 'k-', 'LineWidth', 2);
     dummy_dashed = plot(NaN, NaN, 'k--', 'LineWidth', 1.2);
     plots_for_legend = [plots_for_legend, dummy_solid, dummy_dashed];
@@ -130,7 +123,7 @@ function sim_ber_vs_snr_coded()
     ylim([1e-5 1]); % Ограничиваем снизу до 0.001% ошибок
     xlim([EbNo_vec(1) EbNo_vec(end)]);
     
-    title('Энергетический выигрыш: Сверточный код R=1/2 (K=7) + Интерливер + Мягкий Витерби');
+    title('Энергетический выигрыш: Сверточный код R=1/2 (K=7) + Мягкий Витерби');
     xlabel('E_b/N_0 (dB)');
     ylabel('Bit Error Rate (BER)');
     legend(plots_for_legend, legend_labels, 'Location', 'southwest');

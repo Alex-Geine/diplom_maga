@@ -48,12 +48,10 @@ function decodedBits = viterbi_soft_decoder(llrBits, numInfoBits)
     decision_history = false(numStates, numInfoBits);
     
     % Нормировка и масштабирование LLR
-    max_llr = max(abs(llrBits));
-    if max_llr > 0
-        llr = (llrBits / max_llr) * 4; 
-    else
-        llr = llrBits;
-    end
+    llr = llrBits;
+    max_threshold = 8; % Порог насыщения LLR
+    llr(llr > max_threshold) = max_threshold;
+    llr(llr < -max_threshold) = -max_threshold;
     
     % Группируем LLR по парам [2 x numInfoBits]
     llr_pairs = reshape(llr, 2, numInfoBits);

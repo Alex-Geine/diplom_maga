@@ -36,7 +36,7 @@ function modulo_ber()
             txBits = randi([0 1], N, bps);
             
             % Модуляция
-            [txSig, constellation, bitMap] = my_modulator(txBits, modType);
+            [txSig, constellation, bitMap] = mapper(txBits, modType);
             
             % Расчет шума
             EsNo_dB = EbNo_dB + 10*log10(bps);
@@ -46,7 +46,7 @@ function modulo_ber()
             rxSig = txSig + noise;
             
             % Мягкая демодуляция
-            llr = my_soft_demodulator(rxSig, constellation, bitMap, noiseVar);
+            llr = soft_demapper(rxSig, constellation, bitMap, noiseVar);
             
             % Жесткое решение на основе LLR
             hardBits = (llr < 0); 
