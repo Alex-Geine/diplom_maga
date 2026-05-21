@@ -41,7 +41,7 @@ function test_fec_mmse_system()
     
     %% 4. ПРИЕМНИК (MMSE ЭКВАЛАЙЗЕР + FEC RX)
     % Вызов MMSE Эквалайзера
-    [eqSig, mmseWeights] = mmse_equalizer(rxSig, H, noiseVar);
+    [eqSig] = mmse_equalizer(rxSig, H, noiseVar);
     
     % Мягкая демодуляция
     % Передаем эквализованный сигнал, но с учетом эффективного профиля канала для точного расчета LLR

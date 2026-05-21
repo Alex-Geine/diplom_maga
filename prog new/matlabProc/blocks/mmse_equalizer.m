@@ -1,18 +1,15 @@
-function [eqSig, mmseWeights] = mmse_equalizer(rxSig, H, noiseVar)
-% MMSE_EQUALIZER Однополосный частотный эквалайзер MMSE (Вектор-столбец версия)
-% Вход и выход гарантированно являются векторами-столбцами
+function eqBlock = mmse_equalizer(rxBlock, H_freq, N0)
+% MMSE_EQUALIZER Посимвольный частотный MMSE эквалайзер + АРУ
+% Вход и выход являются векторами-столбцами одинаковой длины (длины FFT)
 
-    % Принудительно вытягиваем всё в столбцы
-    rx = rxSig(:);
-    H_col = H(:);
+    % Вытягиваем в столбцы
+    rx = rxBlock(:);
+    H = H_freq(:);
 
-    % Формула MMSE: W = H* / (|H|^2 + noiseVar)
-    H_conj = conj(H_col);
-    H_mag2 = abs(H_col).^2;
+    % Классическая поточечная формула MMSE: W = H* / (|H|^2 + N0)
+    % Она одновременно разворачивает фазу и компенсирует космическое затухание (FSPL)
+    W = conj(H) ./ (abs(H).^2 + N0);
     
-    % Вычисляем веса (тоже столбец)
-    mmseWeights = H_conj ./ (H_mag2 + noiseVar);
-    
-    % Поэлементное выравнивание сигнала
-    eqSig = rx .* mmseWeights;
+    % Эквализация текущего OFDM символа
+    eqBlock = rx .* W;
 end

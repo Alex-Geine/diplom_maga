@@ -5,22 +5,42 @@ function sim_ber_vs_snr_fading()
     % Подключаем вашу папку с блоками
     addpath('C:\Users\a.blagodatin\Desktop\temp\diploma\blocks\');
     
-    % Диапазон Eb/No (в дБ) для симуляции в канале с замираниями
+    % Диапазон Eb/No (в дБ) для симуляции в канале с замираниями и ICI
+    % Спутниковые каналы с доплеровским размытием требуют более высокого SNR
     EbNo_vec = 0:2:24; 
     
     % Список типов модуляций для анализа
     modTypes = {'QPSK', '16QAM', '64QAM', '256QAM'};
     colors = {'b', 'r', 'g', 'm'};
     
-    % Параметры системы
-    numRowsInterleaver = 40; 
-    targetLength = 24000; % Жестко заданный размер физического кадра
+    % Параметры OFDM и 5G NTN канала
+    fft_size = 2048;          % Количество поднесущих в одном OFDM символе
+    scs_khz = 15;           % Разнос поднесущих
+    d_km = 600;             % Расстояние до спутника LEO
+    fc_ghz = 2.0;           % Частота S-band
+    shadowing_std_db = 3;   % СКО логнормального затенения
+    profile_name = 'A';     % Профиль TDL-A из 3GPP TR 38.901
+    numRowsInterleaver = 40;% Глубина интерливера
+    
+    % Жестко задаем размер физического кадра в эфире (в битах)
+    targetLength = 24000; 
     
     % Массивы для хранения результатов BER
     BER_coded_results = zeros(length(modTypes), length(EbNo_vec));
     BER_uncoded_results = zeros(length(modTypes), length(EbNo_vec));
     
-    %% 2. ОСНОВНОЙ ЦИКЛ СИМУЛЯЦИИ
+    %% 2. ИМИТАЦИЯ МАТРИЦЫ ИНТЕРФЕРЕНЦИИ ПОДНЕСУЩИХ (ICI)
+    % Моделируем фиксированное частотное размытие из-за Доплера
+    alpha_D = 0;
+    epsilon = 8e3 / 3e8;
+    I_matrix = ici_matrix_gen(fft_size, alpha_D, epsilon);
+    %I_matrix = eye(fft_size); %* 0.97;
+    %for idx = 1:fft_size-1
+    %    I_matrix(idx, idx+1) = 0.03i;
+    %    I_matrix(idx+1, idx) = 0.03i;
+    %end
+    
+    %% 3. ОСНОВНОЙ ЦИКЛ СИМУЛЯЦИИ ПО МОДУЛЯЦИЯМ
     for m = 1:length(modTypes)
         modType = modTypes{m};
         
@@ -28,55 +48,78 @@ function sim_ber_vs_snr_fading()
         switch modType
             case 'QPSK',   bps = 2; N_info = 10000;  
             case '16QAM',  bps = 4; N_info = 10000;
-            case '64QAM',  bps = 6; N_info = 10020; 
+            case '64QAM',  bps = 6; N_info = 10020; % Кратность для интерливера
             case '256QAM', bps = 8; N_info = 10000;
         end
         
+        % Эффективная скорость кода с учетом рейт-матчера
         R_eff = N_info / targetLength;
-        fprintf('Симуляция: %s в канале Рэлея (R_eff = %.3f)...\n', modType, R_eff);
+        fprintf('Симуляция: %s в TDL-%s канале NTN (R_eff = %.3f)...\n', modType, profile_name, R_eff);
+        
+        % Вычисляем общее число OFDM-символов в одном кадре данных
+        numSymbolsTotal = targetLength / bps;
+        numOFDMSymbols = numSymbolsTotal / fft_size;
         
         for s = 1:length(EbNo_vec)
             EbNo_dB = EbNo_vec(s);
+            fprintf('  %s | Eb/No: %d dB\n', modType, EbNo_dB);
             
-            % 2.1 Генерация данных и ПЕРЕДАТЧИК (FEC TX)
+            % 3.1 ПЕРЕДАТЧИК БИТОВОГО УРОВНЯ (FEC TX)
             txInfoBits = randi([0 1], N_info, 1);
             [txMatchedBits, lenCodedOrig, lenInterleavedOrig] = ...
                 fec_tx(txInfoBits, numRowsInterleaver, targetLength);
             
-            % 2.2 Модуляция (Маппер)
-            numSymbols = targetLength / bps;
-            txBitsMatrix = reshape(txMatchedBits, numSymbols, bps);
-            [txSig, constellation, bitMap] = mapper(txBitsMatrix, modType);
+            % 3.2 МОДУЛЯЦИЯ (Маппер)
+            txSymbolsMatrix = reshape(txMatchedBits, numSymbolsTotal, bps);
+            [txSigTotal, constellation, bitMap] = mapper(txSymbolsMatrix, modType);
+            txSigTotal = txSigTotal(:); % Гарантируем вектор-столбец
             
-            % 2.3 КАНАЛ С ЗАМИРАНИЯМИ РЭЛЕЯ И AWGN ШУМОМ
+            % Вычисление линейного SNR на символ (Es/No) с учетом избыточности кода
             EsNo_dB = EbNo_dB + 10*log10(bps) + 10*log10(R_eff);
-            EsNo = 10^(EsNo_dB/10);
-            noiseVar = 1 / EsNo; 
+            snr_lin = 10^(EsNo_dB/10);
             
-            % Генерация комплексных коэффициентов замираний Рэлея
-            H = (randn(size(txSig)) + 1i*randn(size(txSig))) / sqrt(2);
-            fadedSig = txSig .* H;
+            % Выделяем буфер под эквализованный сквозной поток символов кадра
+            eqSigTotal = zeros(numSymbolsTotal, 1);
             
-            noise = sqrt(noiseVar/2) * (randn(size(fadedSig)) + 1i*randn(size(fadedSig)));
-            rxSig = fadedSig + noise;
+            % Справочный буфер для LLR канала (без FEC)
+            % Нам понадобится рассчитать "чистый" шум канала для демаппера
+            % На посимвольном уровне он плывет, усредним его для битового уровня
+            mean_noiseVar = 0;
             
-            % 2.4 МЯГКИЙ ПРИЕМНИК (MMSE ЭКВАЛАЙЗЕР + ДЕМАППЕР)
-            % Выравниваем сигнал эквалайзером
-            [eqSig, ~] = mmse_equalizer(rxSig, H, noiseVar);
+            %% 3.3 ПОСИМВОЛЬНЫЙ OFDM ЦИКЛ ОБРАБОТКИ (СИМВОЛЬНЫЙ УРОВЕНЬ)
+            for b = 1:numOFDMSymbols
+                % Вырезаем временное окно ровно ОДНОГО OFDM-символа
+                idx_range = (b-1)*fft_size + 1 : b*fft_size;
+                tx_ofdm_block = txSigTotal(idx_range);
+                
+                % Прогон через посимвольный спутниковый TDL канал
+                [rx_ofdm_block, H_freq, N0] = channel_apply(tx_ofdm_block, profile_name, ...
+                    fft_size, scs_khz, d_km, fc_ghz, shadowing_std_db, I_matrix, snr_lin);
+                
+                % Восстановление фазы, ICI и АРУ через посимвольный MMSE-эквалайзер
+                eq_ofdm_block = mmse_equalizer(rx_ofdm_block, H_freq, N0);
+                
+                % Записываем восстановленный блок в общий приемный буфер кадра
+                eqSigTotal(idx_range) = eq_ofdm_block;
+                mean_noiseVar = mean_noiseVar + N0;
+            end
+            mean_noiseVar = mean_noiseVar / numOFDMSymbols;
             
-            % Демаппируем БЕЗ передачи H (как подтвердил успешный тест)
-            llrMatrix = soft_demapper(eqSig, constellation, bitMap, noiseVar);
-            llrBitsStream = llrMatrix(:); 
+            %% 3.4 МЯГКАЯ ДЕМОДУЛЯЦИЯ (Демаппер)
+            % Демаппируем чистый эквализованный поток без передачи H (как доказал тест)
+            % Используем среднее значение дисперсии шума в качестве опорного
+            llrMatrix = soft_demapper(eqSigTotal, constellation, bitMap, mean_noiseVar);
+            llrBitsStream = llrMatrix(:); % Вытягиваем строго по столбцам
             
-            % 2.5 ДЕКОДЕР (FEC RX)
+            % 3.5 ПРИЕМНИК БИТОВОГО УРОВНЯ (FEC RX)
             rxInfoBits = fec_rx(llrBitsStream, lenInterleavedOrig, ...
                                 numRowsInterleaver, lenCodedOrig, N_info);
             
-            % 2.6 Расчет BER с кодированием (Полный тракт)
+            % 3.6 Расчет BER с кодированием (Полный тракт FEC + MMSE)
             numErrorsCoded = sum(txInfoBits ~= rxInfoBits);
             BER_coded_results(m, s) = numErrorsCoded / N_info;
             
-            % 2.7 Расчет BER без кодирования (Только MMSE эквалайзер в канале)
+            % 3.7 Расчет BER без кодирования (Только посимвольный MMSE в канале)
             llrAfterRecovery = rate_recovery(llrBitsStream, lenInterleavedOrig);
             llrDeinterleaved = deinterleaver(llrAfterRecovery, numRowsInterleaver, lenCodedOrig);
             hardCodedBits = (llrDeinterleaved < 0);
@@ -85,7 +128,7 @@ function sim_ber_vs_snr_fading()
             numErrorsUncoded = sum(txCodedBits_check ~= hardCodedBits);
             BER_uncoded_results(m, s) = numErrorsUncoded / length(txCodedBits_check);
             
-            % Критерий останова симуляции при достижении нулевого BER
+            % Быстрый выход из SNR-цикла, если ошибок после FEC больше нет
             if numErrorsCoded == 0 && s > 5
                 BER_coded_results(m, s:end) = 0;
                 break;
@@ -93,7 +136,7 @@ function sim_ber_vs_snr_fading()
         end
     end
 
-    %% 3. ПОСТРОЕНИЕ ГРАФИКОВ BER vs SNR
+    %% 4. ПОСТРОЕНИЕ СРАВНИТЕЛЬНЫХ ГРАФИКОВ BER vs SNR ДЛЯ ДИПЛОМА
     figure('Color', 'w', 'Position', [150, 100, 950, 650]);
     
     plots_for_legend = [];
@@ -103,36 +146,36 @@ function sim_ber_vs_snr_fading()
         valid_idx_coded = BER_coded_results(m, :) > 0;
         valid_idx_uncoded = BER_uncoded_results(m, :) > 0;
         
-        % Сплошная линия — Полный тракт (MMSE + FEC)
+        % Сплошная линия с маркером — Полный тракт (FEC + Посимвольный MMSE)
         p_coded = semilogy(EbNo_vec(valid_idx_coded), BER_coded_results(m, valid_idx_coded), ...
             [colors{m} '-'], 'LineWidth', 2, 'Marker', 'o', 'MarkerSize', 5);
         hold on;
         
-        % Пунктирная линия — Только MMSE эквалайзер (Без FEC)
+        % Пунктирная линия — Только посимвольный MMSE (Без кодирования)
         semilogy(EbNo_vec(valid_idx_uncoded), BER_uncoded_results(m, valid_idx_uncoded), ... 
             [colors{m} '--'], 'LineWidth', 1.2);
         
         plots_for_legend = [plots_for_legend, p_coded]; %#ok<AGROW>
-        legend_labels = [legend_labels, {sprintf('%s (MMSE + FEC)', modTypes{m})}]; %#ok<AGROW>
+        legend_labels = [legend_labels, {sprintf('%s (FEC + MMSE)', modTypes{m})}]; %#ok<AGROW>
     end
     
     % Добавление служебных линий стиля в легенду
     dummy_solid = plot(NaN, NaN, 'k-', 'LineWidth', 2);
     dummy_dashed = plot(NaN, NaN, 'k--', 'LineWidth', 1.2);
     plots_for_legend = [plots_for_legend, dummy_solid, dummy_dashed];
-    legend_labels = [legend_labels, {'С кодированием (FEC + MMSE)', 'Без кодирования (Только MMSE)'}];
+    legend_labels = [legend_labels, {'Полный тракт (FEC + MMSE)', 'Без кодирования (Только MMSE)'}];
     
     grid on;
     set(gca, 'YScale', 'log'); 
     ylim([1e-5 1]); 
     xlim([EbNo_vec(1) EbNo_vec(end)]);
     
-    title('Кривые BER vs SNR в канале Рэлея с замираниями (Фикс. размер кадра = 24000 бит)');
+    title(sprintf('Кривые BER vs SNR в спутниковом канале 5G NTN (Профиль TDL-%s + ICI)', profile_name));
     xlabel('E_b/N_0 (dB)');
     ylabel('Bit Error Rate (BER)');
     legend(plots_for_legend, legend_labels, 'Location', 'southwest');
     
-    % Автоматическое сохранение результатов для таблиц диплома
-    save('fading_simulation_results.mat', 'EbNo_vec', 'modTypes', 'BER_coded_results', 'BER_uncoded_results');
-    fprintf('\nСимуляция успешно завершена! Данные сохранены в fading_simulation_results.mat\n');
+    % Сохраняем результаты в .mat файл для таблиц
+    save('ntn_simulation_results.mat', 'EbNo_vec', 'modTypes', 'BER_coded_results', 'BER_uncoded_results');
+    fprintf('\nСимуляция успешно завершена! Данные сохранены в ntn_simulation_results.mat\n');
 end
