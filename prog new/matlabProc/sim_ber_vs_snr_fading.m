@@ -14,7 +14,7 @@ function sim_ber_vs_snr_fading()
     colors = {'b', 'r', 'g', 'm'};
     
     % Параметры OFDM и 5G NTN канала
-    fft_size = 1024;          % Количество поднесущих в одном OFDM символе
+    fft_size = 4096;          % Количество поднесущих в одном OFDM символе
     scs_khz = 15;           % Разнос поднесущих
     d_km = 600;             % Расстояние до спутника LEO
     fc_ghz = 2.0;           % Частота S-band
@@ -130,10 +130,10 @@ function sim_ber_vs_snr_fading()
             BER_uncoded_results(m, s) = numErrorsUncoded / lenCodedOrig;
             
             % Быстрый выход из SNR-цикла, если ошибок после FEC больше нет
-            if numErrorsCoded == 0 && s > 5
-                BER_coded_results(m, s:end) = 0;
-                break;
-            end
+            %if numErrorsCoded == 0 && s > 5
+            %    BER_coded_results(m, s:end) = 0;
+            %    break;
+            %end
         end
     end
 
