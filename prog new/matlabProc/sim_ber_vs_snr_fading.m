@@ -76,7 +76,7 @@ function sim_ber_vs_snr_fading()
             
             % 3.1 ПЕРЕДАТЧИК БИТОВОГО УРОВНЯ (FEC TX)
             txInfoBits = randi([0 1], N_info, 1);
-            [txMatchedBits, lenCodedOrig, lenInterleavedOrig] = ...
+            [txMatchedBits, lenCodedOrig, lenInterleavedOrig, txCodedOriginal] = ...
                 fec_tx(txInfoBits, numRowsInterleaver, targetLength);
             
             % 3.2 МОДУЛЯЦИЯ (Маппер)
@@ -133,10 +133,8 @@ function sim_ber_vs_snr_fading()
             llrAfterRecovery = rate_recovery(llrBitsStream, lenInterleavedOrig);
             llrDeinterleaved = deinterleaver(llrAfterRecovery, numRowsInterleaver, lenCodedOrig);
             hardCodedBits = (llrDeinterleaved < 0);
-            
-            txCodedBits_check = conv_encoder(txInfoBits);
-            numErrorsUncoded = sum(txCodedBits_check ~= hardCodedBits);
-            BER_uncoded_results(m, s) = numErrorsUncoded / length(txCodedBits_check);
+            numErrorsUncoded = sum(txCodedOriginal ~= hardCodedBits);
+            BER_uncoded_results(m, s) = numErrorsUncoded / lenCodedOrig;
             
             % Быстрый выход из SNR-цикла, если ошибок после FEC больше нет
             if numErrorsCoded == 0 && s > 5
