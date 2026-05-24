@@ -14,7 +14,7 @@ function sim_ber_vs_snr_fading()
     colors = {'b', 'r', 'g', 'm'};
     
     % Параметры OFDM и 5G NTN канала
-    fft_size = 256;          % Количество поднесущих в одном OFDM символе
+    fft_size = 1024;          % Количество поднесущих в одном OFDM символе
     scs_khz = 15;           % Разнос поднесущих
     d_km = 600;             % Расстояние до спутника LEO
     fc_ghz = 2.0;           % Частота S-band
@@ -88,37 +88,30 @@ function sim_ber_vs_snr_fading()
             EsNo_dB = EbNo_dB + 10*log10(bps) + 10*log10(R_eff);
             snr_lin = 10^(EsNo_dB/10);
             
-            % Выделяем буфер под эквализованный сквозной поток символов кадра
+            % Буферы для принятых символов и дисперсий шума после эквалайзера
             eqSigTotal = zeros(numSymbolsTotal, 1);
-            
-            % Справочный буфер для LLR канала (без FEC)
-            % Нам понадобится рассчитать "чистый" шум канала для демаппера
-            % На посимвольном уровне он плывет, усредним его для битового уровня
-            mean_noiseVar = 0;
-            
-            %% 3.3 ПОСИМВОЛЬНЫЙ OFDM ЦИКЛ ОБРАБОТКИ (СИМВОЛЬНЫЙ УРОВЕНЬ)
-            for b = 1:numOFDMSymbols
-                % Вырезаем временное окно ровно ОДНОГО OFDM-символа
+            noiseVarTotal = zeros(numSymbolsTotal, 1);
+
+            for b = 1:numOFDMSymbolsPerFrame
                 idx_range = (b-1)*fft_size + 1 : b*fft_size;
                 tx_ofdm_block = txSigTotal(idx_range);
-                
-                % Прогон через посимвольный спутниковый TDL канал
+    
+                % Канал
                 [rx_ofdm_block, H_freq, N0] = channel_apply(tx_ofdm_block, profile_name, ...
                     fft_size, scs_khz, d_km, fc_ghz, shadowing_std_db, I_matrix, snr_lin);
-                
-                % Восстановление фазы, ICI и АРУ через посимвольный MMSE-эквалайзер
-                eq_ofdm_block = mmse_equalizer(rx_ofdm_block, H_freq, N0);
-                
-                % Записываем восстановленный блок в общий приемный буфер кадра
+    
+                % MMSE эквалайзер (теперь возвращает и дисперсию)
+                [eq_ofdm_block, noiseVar_eq] = mmse_equalizer(rx_ofdm_block, H_freq, N0);
+    
+                % Сохраняем результаты
                 eqSigTotal(idx_range) = eq_ofdm_block;
-                mean_noiseVar = mean_noiseVar + N0;
+                noiseVarTotal(idx_range) = noiseVar_eq;
             end
-            mean_noiseVar = mean_noiseVar / numOFDMSymbols;
             
             %% 3.4 МЯГКАЯ ДЕМОДУЛЯЦИЯ (Демаппер)
             % Демаппируем чистый эквализованный поток без передачи H (как доказал тест)
             % Используем среднее значение дисперсии шума в качестве опорного
-            llrMatrix = soft_demapper(eqSigTotal, constellation, bitMap, mean_noiseVar);
+            llrMatrix = soft_demapper(eqSigTotal, constellation, bitMap, noiseVarTotal);
             llrBitsStream = llrMatrix(:); % Вытягиваем строго по столбцам
             
             % 3.5 ПРИЕМНИК БИТОВОГО УРОВНЯ (FEC RX)
