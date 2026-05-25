@@ -14,13 +14,13 @@ function sim_ber_vs_snr_fading()
     colors = {'b', 'r', 'g', 'm'};
     
     % Параметры OFDM и 5G NTN канала
-    fft_size = 4096;          % Количество поднесущих в одном OFDM символе
-    scs_khz = 15;           % Разнос поднесущих
-    d_km = 600;             % Расстояние до спутника LEO
-    fc_ghz = 2.0;           % Частота S-band
-    shadowing_std_db = 3;   % СКО логнормального затенения
-    profile_name = 'A';     % Профиль TDL-A из 3GPP TR 38.901
-    numRowsInterleaver = 40;% Глубина интерливера
+    fft_size           = 1024; % Количество поднесущих в одном OFDM символе
+    scs_khz            = 240;  % Разнос поднесущих
+    d_km               = 600;  % Расстояние до спутника LEO
+    fc_ghz             = 2.0;  % Частота S-band
+    shadowing_std_db   = 3;    % СКО логнормального затенения
+    profile_name       = 'A';  % Профиль TDL-A из 3GPP TR 38.901
+    numRowsInterleaver = 40;   % Глубина интерливера
     
     % Жестко задаем размер физического кадра в эфире (в битах)
     %targetLength = 24000; 
@@ -37,7 +37,7 @@ function sim_ber_vs_snr_fading()
     %% 2. ИМИТАЦИЯ МАТРИЦЫ ИНТЕРФЕРЕНЦИИ ПОДНЕСУЩИХ (ICI)
     % Моделируем фиксированное частотное размытие из-за Доплера
     alpha_D = 0;
-    epsilon = 0;%8e3 / 3e8;
+    epsilon = 8e3 / 3e8;
     I_matrix = ici_matrix_gen(fft_size, alpha_D, epsilon);
     %I_matrix = eye(fft_size); %* 0.97;
     %for idx = 1:fft_size-1
