@@ -1,0 +1,95 @@
+% Подключение файла с настройками и подключенными пакетами
+\input{settings/preamble.tex}
+
+\begin{document}
+
+% Включение титульного листа (первая страница файла Title.pdf)
+\includepdf[pages={1-1}]{extra/Title.pdf}
+
+% Оглавление
+\newpage % Начать с новой страницы
+\tableofcontents
+\newpage % Следующий текст тоже с новой страницы
+
+% Аннотация, Содержание, Введение
+\input{chapters/0_introduction.tex}
+
+% Подключение глав
+\input{chapters/1_theory.tex}
+\input{chapters/2_practice.tex}
+
+% Заключение
+\input{chapters/3_conclusion.tex}
+
+\newpage
+\newpage
+\begin{center}
+  \textbf{\large СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ}
+\end{center}
+\refstepcounter{chapter}
+\addcontentsline{toc}{chapter}{СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ}
+%------------------------------------------------------------------------------------
+
+
+\begin{enumerate}
+    \item \label{Figaro2026}
+    Figaro M., Rossato F., Giordani M., Traspadini A., Shimizu T., Mahabal C., Herath S., Lee C., Pekcan D. K., Zorzi M. 5G NR Non-Terrestrial Networks: From Early Results to the Road Ahead // npj Wireless Communications. 2026.
+    
+    \item \label{Rinaldi2020}
+    Rinaldi F., Määttänen H.-L., Torsner J., Pizzi S., Andreev S., Iera A., Koucheryavy Y., Araniti G. Non-Terrestrial Networks in 5G & Beyond: A Survey // IEEE Access. 2020. Vol. 8.
+
+    \item \label{TR38811}
+    3GPP TR 38.811 V15.1.0. Study on New Radio (NR) to support non-terrestrial networks (Release 15) // 3rd Generation Partnership Project (3GPP). 2019.
+
+    \item \label{steputin20216g_v1} 
+    Степутин А. Д., Николаев А. Н. Мобильная связь на пути к 6G: в 2 т. Т. 1. Москва; Вологда: Инфра-Инженерия, 2021. 416 с.
+
+    \item \label{Figaro2023}
+    Figaro M., Rossato F., Giordani M., Zorzi M. Doppler Effect Mitigation in LEO-Based 5G Non-Terrestrial Networks // 2023 IEEE Globecom Workshops (GC Wkshps). 2023.
+
+    \item \label{Asciolla2025}
+    Asciolla M., Cratere A., Dell’Olio F. Doppler Effect Estimation and Compensation for Satellite Systems in Geolocation Problems // IEEE Access. 2025. Vol. 13.
+
+    \item \label{Gannon2022}
+    Gannon A., Downey J., Koch M. Onboard Doppler Compensation for Low-Rate Communications over Commercial Relay Satellites // 27th Ka and Broadband Communications Conference (Ka). 2022.
+
+    \item \label{Dahlman2011} 
+    Dahlman E., Parkvall S., Sk\"{o}ld J. Background of LTE // 4G LTE/LTE-Advanced for Mobile Broadband. Elsevier, 2011. P. 1–13.
+
+    \item \label{Sesia2009} 
+    LTE: The UMTS Long Term Evolution / Ed. by Stefania Sesia, Issam Toufik, Matthew Baker. Hoboken, NJ: Wiley-Blackwell, 2009.
+
+    \item \label{TS138211}
+    ETSI TS 138 211 V18.6.0. 5G; NR; Physical channels and modulation (3GPP TS 38.211 version 18.6.0 Release 18) // European Telecommunications Standards Institute (ETSI). 2025.
+
+    \item \label{ETSI38901}
+    ETSI TR 138 901 V16.1.0 (2020-11). 5G; Study on channel model for frequencies from 0.5 to 100 GHz (3GPP TR 38.901 version 16.1.0 Release 16). 2020.
+
+    \item \label{Li2018}
+    Li K., Sun Z., Ning X., Diao M. Analysis of doppler frequency shift response mechanism based on OFDM system // MATEC Web of Conferences. 2018. Vol. 232.
+
+    \item \label{Goldsmith2005} 
+        Goldsmith A. Wireless Communications. Cambridge University Press, 2005. P. 82-83.
+
+    \item \label{Amiri2007}
+    Amiri S., Mehdipour M. Accurate Doppler Frequency Shift Estimation for any Satellite Orbit // 2007 3rd International Conference on Recent Advances in Space Technologies. 2007. С. 108–112.
+
+    \item \label{AlHourani2024}
+    Al-Hourani A. Doppler Shift Distribution in Satellite Constellations // IEEE Wireless Communications Letters. 2024. Т. 13. № 6. С. 1654–1658.
+
+    \item \label{somov2012satellite}
+    Сомов А. М., Корнев С. Ф. Спутниковые системы связи: Учебное пособие для вузов / Под ред. А. М. Сомова. Москва: Горячая линия–Телеком, 2012. 244 с.
+
+    %    \item \label{maykov2014vliyanie} 
+%    Майков Д. Ю., Вершинин А. С. Влияние эффектов Доплера на OFDM сигнал // Молодой ученый. 2014. № 21(80). С. 175–179.
+%
+%    \item \label{panko2018poliak} 
+%    Панько С. П., Поляк М. Г. Исследование битовых ошибок, обусловленных эффектом Доплера // Космическое приборостроение. 2018. Т. 2, № 2. С. 105–110.
+%
+%    \item \label{Zhuravleva2021} 
+%    Журавлёва Л. М., Нилов М. А., Лошкарев В. Л., Левшунов В. В. Оценка влияния эффекта Доплера на качество радиосвязи в условиях высокоскоростного движения // Мир транспорта. 2021. Т. 18, № 4. С. 54–71.
+%
+%
+\end{enumerate}
+
+\end{document}
